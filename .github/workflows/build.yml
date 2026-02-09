@@ -45,7 +45,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}/vcpkg
-        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}
+        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}-v3
     
     - name: Setup vcpkg
       if: steps.cache-vcpkg.outputs.cache-hit != 'true'
@@ -60,7 +60,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}/build/vcpkg_installed
-        key: vcpkg-installed-linux-server-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+        key: vcpkg-installed-linux-server-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v3
     
     - name: Configure CMake
       run: |
@@ -70,10 +70,11 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
           -DVCPKG_TARGET_TRIPLET=x64-linux \
           -DBUILD_SERVER=ON \
-          -DBUILD_CLIENT=OFF
+          -DBUILD_CLIENT=OFF \
+          -DCMAKE_VERBOSE_MAKEFILE=ON
     
     - name: Build
-      run: cmake --build build --config ${{ env.BUILD_TYPE }}
+      run: cmake --build build --config ${{ env.BUILD_TYPE }} --verbose
     
     - name: Package
       run: |
@@ -87,7 +88,7 @@ jobs:
       with:
         name: signaling-server-linux
         path: artifacts/linux-server.tar.gz
-        retention-days: 7
+        retention-days: 30
 
   # ==================== Windows Client Build ====================
   build-client-windows:
@@ -111,7 +112,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}\vcpkg
-        key: vcpkg-windows-${{ env.VCPKG_COMMIT }}
+        key: vcpkg-windows-${{ env.VCPKG_COMMIT }}-v3
     
     - name: Setup vcpkg
       if: steps.cache-vcpkg.outputs.cache-hit != 'true'
@@ -127,7 +128,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}\build\vcpkg_installed
-        key: vcpkg-installed-windows-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+        key: vcpkg-installed-windows-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v3
     
     - name: Configure CMake
       shell: pwsh
@@ -171,7 +172,7 @@ jobs:
       with:
         name: p2p-client-windows
         path: artifacts/windows-client.zip
-        retention-days: 7
+        retention-days: 30
 
   # ==================== Linux Client Build ====================
   build-client-linux:
@@ -205,7 +206,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}/vcpkg
-        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}
+        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}-v3
     
     - name: Setup vcpkg
       if: steps.cache-vcpkg.outputs.cache-hit != 'true'
@@ -220,7 +221,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}/build/vcpkg_installed
-        key: vcpkg-installed-linux-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+        key: vcpkg-installed-linux-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v3
     
     - name: Configure CMake
       run: |
@@ -230,10 +231,11 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
           -DVCPKG_TARGET_TRIPLET=x64-linux \
           -DBUILD_SERVER=OFF \
-          -DBUILD_CLIENT=ON
+          -DBUILD_CLIENT=ON \
+          -DCMAKE_VERBOSE_MAKEFILE=ON
     
     - name: Build
-      run: cmake --build build --config ${{ env.BUILD_TYPE }}
+      run: cmake --build build --config ${{ env.BUILD_TYPE }} --verbose
     
     - name: Package
       run: |
@@ -247,7 +249,7 @@ jobs:
       with:
         name: p2p-client-linux
         path: artifacts/linux-client.tar.gz
-        retention-days: 7
+        retention-days: 30
 
   # ==================== Create Release ====================
   create-release:

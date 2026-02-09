@@ -8,6 +8,7 @@
 #include <thread>
 #include <csignal>
 #include <atomic>
+#include <sstream>
 
 #include <rtc/rtc.hpp>
 #include <nlohmann/json.hpp>

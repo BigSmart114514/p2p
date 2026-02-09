@@ -1,6 +1,7 @@
 // client/src/main.cpp
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
@@ -9,6 +10,7 @@
 #include <functional>
 #include <unordered_map>
 #include <queue>
+#include <vector>
 
 #include <rtc/rtc.hpp>
 #include <nlohmann/json.hpp>
@@ -376,6 +378,29 @@ private:
     std::function<void(const std::vector<std::string>&)> onPeerListCallback_;
 };
 
+// 简单的字符串分割函数
+std::vector<std::string> splitString(const std::string& str, char delimiter = ' ') {
+    std::vector<std::string> tokens;
+    std::string token;
+    std::istringstream tokenStream(str);
+    while (std::getline(tokenStream, token, delimiter)) {
+        if (!token.empty()) {
+            tokens.push_back(token);
+        }
+    }
+    return tokens;
+}
+
+// 获取第一个空格后的所有内容
+std::string getRestOfLine(const std::string& line, size_t startPos) {
+    if (startPos >= line.length()) return "";
+    size_t pos = line.find(' ', startPos);
+    if (pos == std::string::npos) return "";
+    pos++; // 跳过空格
+    if (pos >= line.length()) return "";
+    return line.substr(pos);
+}
+
 // 交互式命令行界面
 void runInteractiveMode(P2PClient& client) {
     std::cout << "\n=== P2P Client Commands ===" << std::endl;
@@ -390,41 +415,51 @@ void runInteractiveMode(P2PClient& client) {
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
         
-        std::istringstream iss(line);
-        std::string command;
-        iss >> command;
+        // 使用简单的字符串处理代替 istringstream
+        auto tokens = splitString(line);
+        if (tokens.empty()) continue;
+        
+        std::string command = tokens[0];
         
         if (command == "quit" || command == "exit") {
             break;
         } else if (command == "list") {
             client.requestPeerList();
         } else if (command == "connect") {
-            std::string peerId;
-            iss >> peerId;
-            if (!peerId.empty()) {
-                client.connectToPeer(peerId);
+            if (tokens.size() >= 2) {
+                client.connectToPeer(tokens[1]);
             } else {
                 std::cout << "Usage: connect <peer_id>" << std::endl;
             }
         } else if (command == "send") {
-            std::string peerId;
-            iss >> peerId;
-            std::string message;
-            std::getline(iss, message);
-            if (!message.empty()) {
-                message = message.substr(1); // 移除前导空格
-            }
-            if (!peerId.empty() && !message.empty()) {
-                client.sendMessage(peerId, message);
+            if (tokens.size() >= 3) {
+                std::string peerId = tokens[1];
+                // 获取 "send <id> " 之后的所有内容作为消息
+                size_t msgStart = line.find(peerId);
+                if (msgStart != std::string::npos) {
+                    msgStart += peerId.length();
+                    while (msgStart < line.length() && line[msgStart] == ' ') {
+                        msgStart++;
+                    }
+                    if (msgStart < line.length()) {
+                        std::string message = line.substr(msgStart);
+                        client.sendMessage(peerId, message);
+                    } else {
+                        std::cout << "Usage: send <peer_id> <message>" << std::endl;
+                    }
+                }
             } else {
                 std::cout << "Usage: send <peer_id> <message>" << std::endl;
             }
         } else if (command == "broadcast") {
-            std::string message;
-            std::getline(iss, message);
-            if (!message.empty()) {
-                message = message.substr(1);
-                client.broadcastMessage(message);
+            if (tokens.size() >= 2) {
+                // 获取 "broadcast " 之后的所有内容
+                size_t msgStart = line.find(' ');
+                if (msgStart != std::string::npos) {
+                    msgStart++;
+                    std::string message = line.substr(msgStart);
+                    client.broadcastMessage(message);
+                }
             } else {
                 std::cout << "Usage: broadcast <message>" << std::endl;
             }
