@@ -10,14 +10,12 @@
 #include <atomic>
 #include <unordered_map>
 #include <thread>
-#include <regex>
 
 namespace p2p {
 
 using json = nlohmann::json;
 
 // 解析 TURN URL 辅助函数
-// 支持格式: turn:hostname:port 或 turns:hostname:port
 struct ParsedTurnUrl {
     std::string hostname;
     uint16_t port = 3478;
@@ -28,7 +26,6 @@ struct ParsedTurnUrl {
 static ParsedTurnUrl parseTurnUrl(const std::string& url) {
     ParsedTurnUrl result;
     
-    // 简单解析 turn:host:port 或 turns:host:port
     std::string remaining = url;
     
     if (remaining.substr(0, 6) == "turns:") {
@@ -38,10 +35,9 @@ static ParsedTurnUrl parseTurnUrl(const std::string& url) {
         result.isTls = false;
         remaining = remaining.substr(5);
     } else {
-        return result; // 无效格式
+        return result;
     }
     
-    // 查找端口
     size_t colonPos = remaining.rfind(':');
     if (colonPos != std::string::npos) {
         result.hostname = remaining.substr(0, colonPos);
@@ -72,11 +68,10 @@ public:
             rtcConfig_.iceServers.emplace_back(server);
         }
         
-        // 配置 TURN 服务器 - 需要解析 URL 并使用正确的构造函数
+        // 配置 TURN 服务器
         for (const auto& turn : config_.turnServers) {
             auto parsed = parseTurnUrl(turn.url);
             if (parsed.valid) {
-                // 使用 5 参数构造函数: hostname, port, username, password, RelayType
                 rtc::IceServer::RelayType relayType = parsed.isTls ? 
                     rtc::IceServer::RelayType::TurnTls : 
                     rtc::IceServer::RelayType::TurnUdp;
@@ -106,7 +101,6 @@ public:
                 std::cout << "[P2P] Connected to signaling server" << std::endl;
                 setState(ConnectionState::Connected);
                 
-                // 注册
                 SignalingMessage msg;
                 msg.type = MessageType::Register;
                 msg.payload = config_.peerId;
@@ -143,7 +137,6 @@ public:
             
             ws_->open(config_.signalingUrl);
             
-            // 等待连接
             auto timeout = std::chrono::milliseconds(config_.connectionTimeout);
             auto start = std::chrono::steady_clock::now();
             
@@ -477,11 +470,15 @@ private:
     }
     
     void createPeerConnection(const std::string& peerId, bool initiator) {
-        std::lock_guard<std::mutex> lock(peerMutex_);
-        
         auto pc = std::make_shared<rtc::PeerConnection>(rtcConfig_);
-        peerConnections_[peerId] = pc;
         
+        // 先将 PeerConnection 加入 map（在锁内）
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            peerConnections_[peerId] = pc;
+        }
+        
+        // 设置回调（在锁外，避免回调中的死锁）
         pc->onLocalDescription([this, peerId, initiator](rtc::Description description) {
             SignalingMessage msg;
             msg.type = initiator ? MessageType::Offer : MessageType::Answer;
@@ -531,16 +528,18 @@ private:
         
         if (initiator) {
             auto dc = pc->createDataChannel("p2p-channel");
-            setupDataChannel(peerId, dc);
+            setupDataChannel(peerId, dc);  // 现在安全了，因为没有在锁内调用
         }
     }
     
     void setupDataChannel(const std::string& peerId, std::shared_ptr<rtc::DataChannel> dc) {
+        // 先将 DataChannel 加入 map
         {
             std::lock_guard<std::mutex> lock(peerMutex_);
             dataChannels_[peerId] = dc;
         }
         
+        // 设置回调（在锁外）
         dc->onOpen([this, peerId]() {
             std::cout << "[P2P] DataChannel opened with " << peerId << std::endl;
             if (onPeerConnected_) {
