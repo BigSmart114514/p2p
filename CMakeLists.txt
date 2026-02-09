@@ -1,4 +1,3 @@
-# CMakeLists.txt (根目录)
 cmake_minimum_required(VERSION 3.16)
 project(p2p-hole-punching VERSION 1.0.0 LANGUAGES CXX)
 
@@ -12,7 +11,10 @@ if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 endif()
 
 option(BUILD_SERVER "Build signaling server" ON)
-option(BUILD_CLIENT "Build P2P client" ON)
+option(BUILD_CLIENT "Build P2P client library" ON)
+option(P2P_BUILD_SHARED "Build shared library" ON)
+option(P2P_BUILD_STATIC "Build static library" ON)
+option(P2P_BUILD_EXAMPLE "Build example application" ON)
 
 if(BUILD_SERVER)
     add_subdirectory(server)

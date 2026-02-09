@@ -1,4 +1,3 @@
-# .github/workflows/build.yml
 name: Build P2P Hole Punching
 
 on:
@@ -90,9 +89,9 @@ jobs:
         path: artifacts/linux-server.tar.gz
         retention-days: 30
 
-  # ==================== Windows Client Build ====================
+  # ==================== Windows Client Library Build ====================
   build-client-windows:
-    name: Build Client (Windows MSVC)
+    name: Build Client Library (Windows MSVC)
     runs-on: windows-latest
     
     steps:
@@ -128,7 +127,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}\build\vcpkg_installed
-        key: vcpkg-installed-windows-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v3
+        key: vcpkg-installed-windows-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v4
     
     - name: Configure CMake
       shell: pwsh
@@ -140,43 +139,56 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=x64-windows `
           -DBUILD_SERVER=OFF `
-          -DBUILD_CLIENT=ON
+          -DBUILD_CLIENT=ON `
+          -DP2P_BUILD_SHARED=ON `
+          -DP2P_BUILD_STATIC=ON `
+          -DP2P_BUILD_EXAMPLE=ON
     
     - name: Build
       run: cmake --build build --config ${{ env.BUILD_TYPE }}
     
-    - name: Gather DLLs and Package
+    - name: Package Library
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path artifacts\windows-client
+        New-Item -ItemType Directory -Force -Path artifacts\windows-lib\include\p2p
+        New-Item -ItemType Directory -Force -Path artifacts\windows-lib\lib
+        New-Item -ItemType Directory -Force -Path artifacts\windows-lib\bin
         
-        # 复制主程序
-        Copy-Item "build\client\${{ env.BUILD_TYPE }}\p2p-client.exe" "artifacts\windows-client\"
+        # 复制头文件
+        Copy-Item "client\include\p2p\*.hpp" "artifacts\windows-lib\include\p2p\"
         
-        # 复制vcpkg安装的DLL (从build目录的vcpkg_installed)
+        # 复制库文件
+        Copy-Item "build\lib\${{ env.BUILD_TYPE }}\p2p-client.lib" "artifacts\windows-lib\lib\" -ErrorAction SilentlyContinue
+        Copy-Item "build\lib\${{ env.BUILD_TYPE }}\p2p-client.dll" "artifacts\windows-lib\bin\" -ErrorAction SilentlyContinue
+        Copy-Item "build\bin\${{ env.BUILD_TYPE }}\p2p-client.dll" "artifacts\windows-lib\bin\" -ErrorAction SilentlyContinue
+        
+        # 复制示例程序
+        Copy-Item "build\bin\${{ env.BUILD_TYPE }}\p2p-example.exe" "artifacts\windows-lib\bin\"
+        
+        # 复制依赖DLL
         $vcpkgBin = "${{ github.workspace }}\build\vcpkg_installed\x64-windows\bin"
         if (Test-Path $vcpkgBin) {
           Get-ChildItem "$vcpkgBin\*.dll" | ForEach-Object {
-            Copy-Item $_.FullName "artifacts\windows-client\"
+            Copy-Item $_.FullName "artifacts\windows-lib\bin\"
           }
         }
         
         # 列出文件
-        Get-ChildItem "artifacts\windows-client\"
+        Get-ChildItem -Recurse "artifacts\windows-lib\"
         
         # 创建ZIP
-        Compress-Archive -Path "artifacts\windows-client\*" -DestinationPath "artifacts\windows-client.zip"
+        Compress-Archive -Path "artifacts\windows-lib\*" -DestinationPath "artifacts\p2p-client-windows.zip"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: p2p-client-windows
-        path: artifacts/windows-client.zip
+        name: p2p-client-library-windows
+        path: artifacts/p2p-client-windows.zip
         retention-days: 30
 
-  # ==================== Linux Client Build ====================
+  # ==================== Linux Client Library Build ====================
   build-client-linux:
-    name: Build Client (Ubuntu 24.04)
+    name: Build Client Library (Ubuntu 24.04)
     runs-on: ubuntu-24.04
     
     steps:
@@ -221,7 +233,7 @@ jobs:
       with:
         path: |
           ${{ github.workspace }}/build/vcpkg_installed
-        key: vcpkg-installed-linux-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v3
+        key: vcpkg-installed-linux-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v4
     
     - name: Configure CMake
       run: |
@@ -232,23 +244,41 @@ jobs:
           -DVCPKG_TARGET_TRIPLET=x64-linux \
           -DBUILD_SERVER=OFF \
           -DBUILD_CLIENT=ON \
+          -DP2P_BUILD_SHARED=ON \
+          -DP2P_BUILD_STATIC=ON \
+          -DP2P_BUILD_EXAMPLE=ON \
           -DCMAKE_VERBOSE_MAKEFILE=ON
     
     - name: Build
       run: cmake --build build --config ${{ env.BUILD_TYPE }} --verbose
     
-    - name: Package
+    - name: Package Library
       run: |
-        mkdir -p artifacts/linux-client
-        cp build/client/p2p-client artifacts/linux-client/
-        chmod +x artifacts/linux-client/p2p-client
-        cd artifacts && tar -czvf linux-client.tar.gz linux-client
+        mkdir -p artifacts/linux-lib/include/p2p
+        mkdir -p artifacts/linux-lib/lib
+        mkdir -p artifacts/linux-lib/bin
+        
+        # 复制头文件
+        cp client/include/p2p/*.hpp artifacts/linux-lib/include/p2p/
+        
+        # 复制库文件
+        cp build/lib/libp2p-client.a artifacts/linux-lib/lib/ || true
+        cp build/lib/libp2p-client.so* artifacts/linux-lib/lib/ || true
+        
+        # 复制示例程序
+        cp build/bin/p2p-example artifacts/linux-lib/bin/
+        chmod +x artifacts/linux-lib/bin/p2p-example
+        
+        # 列出文件
+        find artifacts/linux-lib -type f
+        
+        cd artifacts && tar -czvf p2p-client-linux.tar.gz linux-lib
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: p2p-client-linux
-        path: artifacts/linux-client.tar.gz
+        name: p2p-client-library-linux
+        path: artifacts/p2p-client-linux.tar.gz
         retention-days: 30
 
   # ==================== Create Release ====================
@@ -275,8 +305,8 @@ jobs:
       with:
         files: |
           artifacts/signaling-server-linux/linux-server.tar.gz
-          artifacts/p2p-client-windows/windows-client.zip
-          artifacts/p2p-client-linux/linux-client.tar.gz
+          artifacts/p2p-client-library-windows/p2p-client-windows.zip
+          artifacts/p2p-client-library-linux/p2p-client-linux.tar.gz
         draft: false
         prerelease: false
         generate_release_notes: true
