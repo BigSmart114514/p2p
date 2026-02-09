@@ -10,10 +10,54 @@
 #include <atomic>
 #include <unordered_map>
 #include <thread>
+#include <regex>
 
 namespace p2p {
 
 using json = nlohmann::json;
+
+// 解析 TURN URL 辅助函数
+// 支持格式: turn:hostname:port 或 turns:hostname:port
+struct ParsedTurnUrl {
+    std::string hostname;
+    uint16_t port = 3478;
+    bool isTls = false;
+    bool valid = false;
+};
+
+static ParsedTurnUrl parseTurnUrl(const std::string& url) {
+    ParsedTurnUrl result;
+    
+    // 简单解析 turn:host:port 或 turns:host:port
+    std::string remaining = url;
+    
+    if (remaining.substr(0, 6) == "turns:") {
+        result.isTls = true;
+        remaining = remaining.substr(6);
+    } else if (remaining.substr(0, 5) == "turn:") {
+        result.isTls = false;
+        remaining = remaining.substr(5);
+    } else {
+        return result; // 无效格式
+    }
+    
+    // 查找端口
+    size_t colonPos = remaining.rfind(':');
+    if (colonPos != std::string::npos) {
+        result.hostname = remaining.substr(0, colonPos);
+        try {
+            result.port = static_cast<uint16_t>(std::stoi(remaining.substr(colonPos + 1)));
+        } catch (...) {
+            result.port = result.isTls ? 5349 : 3478;
+        }
+    } else {
+        result.hostname = remaining;
+        result.port = result.isTls ? 5349 : 3478;
+    }
+    
+    result.valid = !result.hostname.empty();
+    return result;
+}
 
 // ==================== 实现类 ====================
 class P2PClientImpl {
@@ -23,12 +67,27 @@ public:
         , state_(ConnectionState::Disconnected)
         , running_(false)
     {
-        // 配置 RTC
+        // 配置 RTC - STUN 服务器
         for (const auto& server : config_.stunServers) {
             rtcConfig_.iceServers.emplace_back(server);
         }
+        
+        // 配置 TURN 服务器 - 需要解析 URL 并使用正确的构造函数
         for (const auto& turn : config_.turnServers) {
-            rtcConfig_.iceServers.emplace_back(turn.url, turn.username, turn.credential);
+            auto parsed = parseTurnUrl(turn.url);
+            if (parsed.valid) {
+                // 使用 5 参数构造函数: hostname, port, username, password, RelayType
+                rtc::IceServer::RelayType relayType = parsed.isTls ? 
+                    rtc::IceServer::RelayType::TurnTls : 
+                    rtc::IceServer::RelayType::TurnUdp;
+                rtcConfig_.iceServers.emplace_back(
+                    parsed.hostname, 
+                    parsed.port, 
+                    turn.username, 
+                    turn.credential,
+                    relayType
+                );
+            }
         }
     }
     

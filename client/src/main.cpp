@@ -10,6 +10,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <iomanip>  // 添加这个头文件
 
 #include "p2p/p2p_client.hpp"
 
