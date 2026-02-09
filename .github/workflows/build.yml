@@ -154,18 +154,27 @@ jobs:
         New-Item -ItemType Directory -Force -Path artifacts\windows-lib\lib
         New-Item -ItemType Directory -Force -Path artifacts\windows-lib\bin
         
-        # 复制头文件
+        # 1. 复制头文件
         Copy-Item "client\include\p2p\*.hpp" "artifacts\windows-lib\include\p2p\"
         
-        # 复制库文件
+        # 2. 复制项目生成的库文件
         Copy-Item "build\lib\${{ env.BUILD_TYPE }}\p2p-client.lib" "artifacts\windows-lib\lib\" -ErrorAction SilentlyContinue
         Copy-Item "build\lib\${{ env.BUILD_TYPE }}\p2p-client.dll" "artifacts\windows-lib\bin\" -ErrorAction SilentlyContinue
         Copy-Item "build\bin\${{ env.BUILD_TYPE }}\p2p-client.dll" "artifacts\windows-lib\bin\" -ErrorAction SilentlyContinue
         
-        # 复制示例程序
+        # 3. 复制示例程序
         Copy-Item "build\bin\${{ env.BUILD_TYPE }}\p2p-example.exe" "artifacts\windows-lib\bin\"
         
-        # 复制依赖DLL
+        # 4. 【新增】复制 vcpkg 编译的依赖 .lib 文件 (用于静态链接)
+        $vcpkgLib = "${{ github.workspace }}\build\vcpkg_installed\x64-windows\lib"
+        if (Test-Path $vcpkgLib) {
+          Write-Host "Copying dependency libs from $vcpkgLib"
+          Get-ChildItem "$vcpkgLib\*.lib" | ForEach-Object {
+            Copy-Item $_.FullName "artifacts\windows-lib\lib\"
+          }
+        }
+
+        # 5. 复制依赖 DLL (运行时需要)
         $vcpkgBin = "${{ github.workspace }}\build\vcpkg_installed\x64-windows\bin"
         if (Test-Path $vcpkgBin) {
           Get-ChildItem "$vcpkgBin\*.dll" | ForEach-Object {
@@ -173,7 +182,7 @@ jobs:
           }
         }
         
-        # 列出文件
+        # 列出文件验证
         Get-ChildItem -Recurse "artifacts\windows-lib\"
         
         # 创建ZIP
@@ -258,18 +267,26 @@ jobs:
         mkdir -p artifacts/linux-lib/lib
         mkdir -p artifacts/linux-lib/bin
         
-        # 复制头文件
+        # 1. 复制头文件
         cp client/include/p2p/*.hpp artifacts/linux-lib/include/p2p/
         
-        # 复制库文件
+        # 2. 复制项目生成的库文件
         cp build/lib/libp2p-client.a artifacts/linux-lib/lib/ || true
         cp build/lib/libp2p-client.so* artifacts/linux-lib/lib/ || true
         
-        # 复制示例程序
+        # 3. 【新增】复制 vcpkg 编译的依赖库 (.a 和 .so)
+        VCPKG_LIB_DIR="${{ github.workspace }}/build/vcpkg_installed/x64-linux/lib"
+        if [ -d "$VCPKG_LIB_DIR" ]; then
+          echo "Copying dependency libs from $VCPKG_LIB_DIR"
+          cp -P $VCPKG_LIB_DIR/*.a artifacts/linux-lib/lib/ 2>/dev/null || true
+          cp -P $VCPKG_LIB_DIR/*.so* artifacts/linux-lib/lib/ 2>/dev/null || true
+        fi
+
+        # 4. 复制示例程序
         cp build/bin/p2p-example artifacts/linux-lib/bin/
         chmod +x artifacts/linux-lib/bin/p2p-example
         
-        # 列出文件
+        # 列出文件验证
         find artifacts/linux-lib -type f
         
         cd artifacts && tar -czvf p2p-client-linux.tar.gz linux-lib
