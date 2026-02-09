@@ -10,7 +10,6 @@ on:
 
 env:
   BUILD_TYPE: Release
-  # 使用完整的40位SHA1哈希
   VCPKG_COMMIT: 'c82f74667287d3dc386bce81e44964370c91a289'
 
 jobs:
@@ -39,43 +38,29 @@ jobs:
           unzip \
           tar \
           git
-    
+
     - name: Cache vcpkg
       uses: actions/cache@v4
+      id: cache-vcpkg
       with:
         path: |
           ${{ github.workspace }}/vcpkg
-          !${{ github.workspace }}/vcpkg/buildtrees
-          !${{ github.workspace }}/vcpkg/packages
-          !${{ github.workspace }}/vcpkg/downloads
-        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
-        restore-keys: |
-          vcpkg-linux-${{ env.VCPKG_COMMIT }}-
+        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}
     
     - name: Setup vcpkg
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
       run: |
-        if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
-          git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
-        fi
+        git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
         cd ${{ github.workspace }}/vcpkg
-        git fetch
         git checkout ${{ env.VCPKG_COMMIT }}
         ./bootstrap-vcpkg.sh
-    
-    - name: Cache vcpkg packages
+
+    - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
         path: |
-          ${{ github.workspace }}/vcpkg/installed
-        key: vcpkg-packages-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
-    
-    - name: Install vcpkg packages
-      run: |
-        ${{ github.workspace }}/vcpkg/vcpkg install \
-          libdatachannel \
-          nlohmann-json \
-          openssl \
-          --triplet x64-linux
+          ${{ github.workspace }}/build/vcpkg_installed
+        key: vcpkg-installed-linux-server-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
     
     - name: Configure CMake
       run: |
@@ -102,7 +87,7 @@ jobs:
       with:
         name: signaling-server-linux
         path: artifacts/linux-server.tar.gz
-        retention-days: 30
+        retention-days: 7
 
   # ==================== Windows Client Build ====================
   build-client-windows:
@@ -119,45 +104,30 @@ jobs:
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
-    
+
     - name: Cache vcpkg
       uses: actions/cache@v4
+      id: cache-vcpkg
       with:
         path: |
-          C:\vcpkg
-          !C:\vcpkg\buildtrees
-          !C:\vcpkg\packages
-          !C:\vcpkg\downloads
-        key: vcpkg-windows-${{ env.VCPKG_COMMIT }}-v2
-        restore-keys: |
-          vcpkg-windows-${{ env.VCPKG_COMMIT }}-
+          ${{ github.workspace }}\vcpkg
+        key: vcpkg-windows-${{ env.VCPKG_COMMIT }}
     
     - name: Setup vcpkg
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
-        cd C:\
-        if (!(Test-Path "C:\vcpkg")) {
-          git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
-        }
-        cd C:\vcpkg
-        git fetch
+        git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}\vcpkg
+        cd ${{ github.workspace }}\vcpkg
         git checkout ${{ env.VCPKG_COMMIT }}
         .\bootstrap-vcpkg.bat
-    
-    - name: Cache vcpkg packages
+
+    - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
         path: |
-          C:\vcpkg\installed
-        key: vcpkg-packages-windows-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v2
-    
-    - name: Install vcpkg packages
-      shell: pwsh
-      run: |
-        C:\vcpkg\vcpkg install `
-          libdatachannel:x64-windows `
-          nlohmann-json:x64-windows `
-          openssl:x64-windows
+          ${{ github.workspace }}\build\vcpkg_installed
+        key: vcpkg-installed-windows-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
     
     - name: Configure CMake
       shell: pwsh
@@ -166,7 +136,7 @@ jobs:
           -G "Visual Studio 17 2022" `
           -A x64 `
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
-          -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=x64-windows `
           -DBUILD_SERVER=OFF `
           -DBUILD_CLIENT=ON
@@ -177,33 +147,33 @@ jobs:
     - name: Gather DLLs and Package
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path artifacts/windows-client
+        New-Item -ItemType Directory -Force -Path artifacts\windows-client
         
         # 复制主程序
-        Copy-Item "build/client/${{ env.BUILD_TYPE }}/p2p-client.exe" "artifacts/windows-client/"
+        Copy-Item "build\client\${{ env.BUILD_TYPE }}\p2p-client.exe" "artifacts\windows-client\"
         
-        # 复制vcpkg安装的DLL
-        $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+        # 复制vcpkg安装的DLL (从build目录的vcpkg_installed)
+        $vcpkgBin = "${{ github.workspace }}\build\vcpkg_installed\x64-windows\bin"
         if (Test-Path $vcpkgBin) {
           Get-ChildItem "$vcpkgBin\*.dll" | ForEach-Object {
-            Copy-Item $_.FullName "artifacts/windows-client/"
+            Copy-Item $_.FullName "artifacts\windows-client\"
           }
         }
         
-        # 复制debug DLL（如果需要）
-        $vcpkgDebugBin = "C:\vcpkg\installed\x64-windows\debug\bin"
+        # 列出文件
+        Get-ChildItem "artifacts\windows-client\"
         
         # 创建ZIP
-        Compress-Archive -Path "artifacts/windows-client/*" -DestinationPath "artifacts/windows-client.zip"
+        Compress-Archive -Path "artifacts\windows-client\*" -DestinationPath "artifacts\windows-client.zip"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: p2p-client-windows
         path: artifacts/windows-client.zip
-        retention-days: 30
+        retention-days: 7
 
-  # ==================== Linux Client Build (for testing) ====================
+  # ==================== Linux Client Build ====================
   build-client-linux:
     name: Build Client (Ubuntu 24.04)
     runs-on: ubuntu-24.04
@@ -228,43 +198,29 @@ jobs:
           unzip \
           tar \
           git
-    
+
     - name: Cache vcpkg
       uses: actions/cache@v4
+      id: cache-vcpkg
       with:
         path: |
           ${{ github.workspace }}/vcpkg
-          !${{ github.workspace }}/vcpkg/buildtrees
-          !${{ github.workspace }}/vcpkg/packages
-          !${{ github.workspace }}/vcpkg/downloads
-        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
-        restore-keys: |
-          vcpkg-linux-${{ env.VCPKG_COMMIT }}-
+        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}
     
     - name: Setup vcpkg
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
       run: |
-        if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
-          git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
-        fi
+        git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
         cd ${{ github.workspace }}/vcpkg
-        git fetch
         git checkout ${{ env.VCPKG_COMMIT }}
         ./bootstrap-vcpkg.sh
-    
-    - name: Cache vcpkg packages
+
+    - name: Cache vcpkg installed packages
       uses: actions/cache@v4
       with:
         path: |
-          ${{ github.workspace }}/vcpkg/installed
-        key: vcpkg-packages-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
-    
-    - name: Install vcpkg packages
-      run: |
-        ${{ github.workspace }}/vcpkg/vcpkg install \
-          libdatachannel \
-          nlohmann-json \
-          openssl \
-          --triplet x64-linux
+          ${{ github.workspace }}/build/vcpkg_installed
+        key: vcpkg-installed-linux-client-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
     
     - name: Configure CMake
       run: |
@@ -291,7 +247,7 @@ jobs:
       with:
         name: p2p-client-linux
         path: artifacts/linux-client.tar.gz
-        retention-days: 30
+        retention-days: 7
 
   # ==================== Create Release ====================
   create-release:
