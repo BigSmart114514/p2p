@@ -1,0 +1,10 @@
+{
+    "name": "p2p-hole-punching",
+    "version-string": "1.0.0",
+    "description": "P2P hole punching implementation using libdatachannel",
+    "dependencies": [
+        "libdatachannel",
+        "nlohmann-json",
+        "openssl"
+    ]
+}

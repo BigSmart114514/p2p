@@ -1,0 +1,215 @@
+# .github/workflows/build.yml
+name: Build P2P Hole Punching
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # ==================== Linux Server Build ====================
+  build-server-linux:
+    name: Build Server (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          libssl-dev \
+          libsrtp2-dev \
+          libjuice-dev \
+          pkg-config
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '2024.01.12'  # 使用固定版本
+        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+    
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DBUILD_SERVER=ON \
+          -DBUILD_CLIENT=OFF
+    
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }}
+    
+    - name: Package
+      run: |
+        mkdir -p artifacts/linux-server
+        cp build/server/signaling-server artifacts/linux-server/
+        chmod +x artifacts/linux-server/signaling-server
+        cd artifacts && tar -czvf linux-server.tar.gz linux-server
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: signaling-server-linux
+        path: artifacts/linux-server.tar.gz
+        retention-days: 30
+
+  # ==================== Windows Client Build ====================
+  build-client-windows:
+    name: Build Client (Windows MSVC)
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '2024.01.12'
+        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+    
+    - name: Install vcpkg packages
+      run: |
+        ${{ github.workspace }}/vcpkg/vcpkg install libdatachannel:x64-windows
+        ${{ github.workspace }}/vcpkg/vcpkg install nlohmann-json:x64-windows
+        ${{ github.workspace }}/vcpkg/vcpkg install openssl:x64-windows
+    
+    - name: Configure CMake
+      run: |
+        cmake -B build `
+          -G "Visual Studio 17 2022" `
+          -A x64 `
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+          -DBUILD_SERVER=OFF `
+          -DBUILD_CLIENT=ON
+    
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }}
+    
+    - name: Gather DLLs and Package
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path artifacts/windows-client
+        
+        # 复制主程序
+        Copy-Item "build/client/${{ env.BUILD_TYPE }}/p2p-client.exe" "artifacts/windows-client/"
+        
+        # 复制vcpkg安装的DLL
+        $vcpkgBin = "${{ github.workspace }}/vcpkg/installed/x64-windows/bin"
+        if (Test-Path $vcpkgBin) {
+          Get-ChildItem "$vcpkgBin/*.dll" | ForEach-Object {
+            Copy-Item $_.FullName "artifacts/windows-client/"
+          }
+        }
+        
+        # 创建ZIP
+        Compress-Archive -Path "artifacts/windows-client/*" -DestinationPath "artifacts/windows-client.zip"
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: p2p-client-windows
+        path: artifacts/windows-client.zip
+        retention-days: 30
+
+  # ==================== Cross-Platform Client Build ====================
+  build-client-linux:
+    name: Build Client (Ubuntu for testing)
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          libssl-dev \
+          libsrtp2-dev \
+          libjuice-dev \
+          pkg-config
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '2024.01.12'
+        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+    
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DBUILD_SERVER=OFF \
+          -DBUILD_CLIENT=ON
+    
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }}
+    
+    - name: Package
+      run: |
+        mkdir -p artifacts/linux-client
+        cp build/client/p2p-client artifacts/linux-client/
+        chmod +x artifacts/linux-client/p2p-client
+        cd artifacts && tar -czvf linux-client.tar.gz linux-client
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: p2p-client-linux
+        path: artifacts/linux-client.tar.gz
+        retention-days: 30
+
+  # ==================== Create Release ====================
+  create-release:
+    name: Create Release
+    needs: [build-server-linux, build-client-windows, build-client-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/signaling-server-linux/linux-server.tar.gz
+          artifacts/p2p-client-windows/windows-client.zip
+          artifacts/p2p-client-linux/linux-client.tar.gz
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
