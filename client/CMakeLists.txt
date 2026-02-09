@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Windows特定设置
 if(MSVC)
     add_compile_options(/W4 /utf-8)
-    add_definitions(-D_WIN32_WINNT=0x0A00)
+    add_definitions(-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN)
 endif()
 
 # 查找依赖
@@ -21,7 +21,7 @@ add_executable(p2p-client
 )
 
 target_include_directories(p2p-client PRIVATE
-    ${CMAKE_SOURCE_DIR}/../common/include
+    ${CMAKE_SOURCE_DIR}/common/include
 )
 
 target_link_libraries(p2p-client PRIVATE
@@ -31,8 +31,12 @@ target_link_libraries(p2p-client PRIVATE
     OpenSSL::Crypto
 )
 
+# 平台特定链接
 if(WIN32)
-    target_link_libraries(p2p-client PRIVATE ws2_32)
+    target_link_libraries(p2p-client PRIVATE ws2_32 crypt32)
+elseif(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(p2p-client PRIVATE Threads::Threads)
 endif()
 
 # 安装

@@ -1,13 +1,13 @@
 # server/CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
-project(p2p-signaling-server VERSION 1.0.0 LANGUAGES CXX)
+project(signaling-server VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 查找依赖
-find_package(LibDataChannel REQUIRED)
-find_package(nlohmann_json REQUIRED)
+find_package(LibDataChannel CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 add_executable(signaling-server
@@ -23,8 +23,13 @@ target_link_libraries(signaling-server PRIVATE
     nlohmann_json::nlohmann_json
     OpenSSL::SSL
     OpenSSL::Crypto
-    pthread
 )
+
+# Linux需要pthread
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(signaling-server PRIVATE Threads::Threads)
+endif()
 
 # 安装
 install(TARGETS signaling-server RUNTIME DESTINATION bin)

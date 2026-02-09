@@ -10,6 +10,8 @@ on:
 
 env:
   BUILD_TYPE: Release
+  # 使用完整的40位SHA1哈希
+  VCPKG_COMMIT: 'c82f74667287d3dc386bce81e44964370c91a289'
 
 jobs:
   # ==================== Linux Server Build ====================
@@ -23,23 +25,57 @@ jobs:
       with:
         submodules: recursive
     
-    - name: Install dependencies
+    - name: Install system dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           build-essential \
           cmake \
           ninja-build \
+          pkg-config \
           libssl-dev \
-          libsrtp2-dev \
-          libjuice-dev \
-          pkg-config
+          curl \
+          zip \
+          unzip \
+          tar \
+          git
+    
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/vcpkg
+          !${{ github.workspace }}/vcpkg/buildtrees
+          !${{ github.workspace }}/vcpkg/packages
+          !${{ github.workspace }}/vcpkg/downloads
+        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-linux-${{ env.VCPKG_COMMIT }}-
     
     - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
+      run: |
+        if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
+          git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
+        fi
+        cd ${{ github.workspace }}/vcpkg
+        git fetch
+        git checkout ${{ env.VCPKG_COMMIT }}
+        ./bootstrap-vcpkg.sh
+    
+    - name: Cache vcpkg packages
+      uses: actions/cache@v4
       with:
-        vcpkgGitCommitId: '2024.01.12'  # 使用固定版本
-        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+        path: |
+          ${{ github.workspace }}/vcpkg/installed
+        key: vcpkg-packages-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+    
+    - name: Install vcpkg packages
+      run: |
+        ${{ github.workspace }}/vcpkg/vcpkg install \
+          libdatachannel \
+          nlohmann-json \
+          openssl \
+          --triplet x64-linux
     
     - name: Configure CMake
       run: |
@@ -47,6 +83,7 @@ jobs:
           -G Ninja \
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=x64-linux \
           -DBUILD_SERVER=ON \
           -DBUILD_CLIENT=OFF
     
@@ -83,25 +120,54 @@ jobs:
       with:
         arch: x64
     
-    - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
+    - name: Cache vcpkg
+      uses: actions/cache@v4
       with:
-        vcpkgGitCommitId: '2024.01.12'
-        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+        path: |
+          C:\vcpkg
+          !C:\vcpkg\buildtrees
+          !C:\vcpkg\packages
+          !C:\vcpkg\downloads
+        key: vcpkg-windows-${{ env.VCPKG_COMMIT }}-v2
+        restore-keys: |
+          vcpkg-windows-${{ env.VCPKG_COMMIT }}-
+    
+    - name: Setup vcpkg
+      shell: pwsh
+      run: |
+        cd C:\
+        if (!(Test-Path "C:\vcpkg")) {
+          git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+        }
+        cd C:\vcpkg
+        git fetch
+        git checkout ${{ env.VCPKG_COMMIT }}
+        .\bootstrap-vcpkg.bat
+    
+    - name: Cache vcpkg packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          C:\vcpkg\installed
+        key: vcpkg-packages-windows-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}-v2
     
     - name: Install vcpkg packages
+      shell: pwsh
       run: |
-        ${{ github.workspace }}/vcpkg/vcpkg install libdatachannel:x64-windows
-        ${{ github.workspace }}/vcpkg/vcpkg install nlohmann-json:x64-windows
-        ${{ github.workspace }}/vcpkg/vcpkg install openssl:x64-windows
+        C:\vcpkg\vcpkg install `
+          libdatachannel:x64-windows `
+          nlohmann-json:x64-windows `
+          openssl:x64-windows
     
     - name: Configure CMake
+      shell: pwsh
       run: |
         cmake -B build `
           -G "Visual Studio 17 2022" `
           -A x64 `
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
-          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET=x64-windows `
           -DBUILD_SERVER=OFF `
           -DBUILD_CLIENT=ON
     
@@ -117,12 +183,15 @@ jobs:
         Copy-Item "build/client/${{ env.BUILD_TYPE }}/p2p-client.exe" "artifacts/windows-client/"
         
         # 复制vcpkg安装的DLL
-        $vcpkgBin = "${{ github.workspace }}/vcpkg/installed/x64-windows/bin"
+        $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
         if (Test-Path $vcpkgBin) {
-          Get-ChildItem "$vcpkgBin/*.dll" | ForEach-Object {
+          Get-ChildItem "$vcpkgBin\*.dll" | ForEach-Object {
             Copy-Item $_.FullName "artifacts/windows-client/"
           }
         }
+        
+        # 复制debug DLL（如果需要）
+        $vcpkgDebugBin = "C:\vcpkg\installed\x64-windows\debug\bin"
         
         # 创建ZIP
         Compress-Archive -Path "artifacts/windows-client/*" -DestinationPath "artifacts/windows-client.zip"
@@ -134,9 +203,9 @@ jobs:
         path: artifacts/windows-client.zip
         retention-days: 30
 
-  # ==================== Cross-Platform Client Build ====================
+  # ==================== Linux Client Build (for testing) ====================
   build-client-linux:
-    name: Build Client (Ubuntu for testing)
+    name: Build Client (Ubuntu 24.04)
     runs-on: ubuntu-24.04
     
     steps:
@@ -145,23 +214,57 @@ jobs:
       with:
         submodules: recursive
     
-    - name: Install dependencies
+    - name: Install system dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           build-essential \
           cmake \
           ninja-build \
+          pkg-config \
           libssl-dev \
-          libsrtp2-dev \
-          libjuice-dev \
-          pkg-config
+          curl \
+          zip \
+          unzip \
+          tar \
+          git
+    
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/vcpkg
+          !${{ github.workspace }}/vcpkg/buildtrees
+          !${{ github.workspace }}/vcpkg/packages
+          !${{ github.workspace }}/vcpkg/downloads
+        key: vcpkg-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-linux-${{ env.VCPKG_COMMIT }}-
     
     - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
+      run: |
+        if [ ! -d "${{ github.workspace }}/vcpkg" ]; then
+          git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
+        fi
+        cd ${{ github.workspace }}/vcpkg
+        git fetch
+        git checkout ${{ env.VCPKG_COMMIT }}
+        ./bootstrap-vcpkg.sh
+    
+    - name: Cache vcpkg packages
+      uses: actions/cache@v4
       with:
-        vcpkgGitCommitId: '2024.01.12'
-        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+        path: |
+          ${{ github.workspace }}/vcpkg/installed
+        key: vcpkg-packages-linux-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+    
+    - name: Install vcpkg packages
+      run: |
+        ${{ github.workspace }}/vcpkg/vcpkg install \
+          libdatachannel \
+          nlohmann-json \
+          openssl \
+          --triplet x64-linux
     
     - name: Configure CMake
       run: |
@@ -169,6 +272,7 @@ jobs:
           -G Ninja \
           -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=x64-linux \
           -DBUILD_SERVER=OFF \
           -DBUILD_CLIENT=ON
     
@@ -196,14 +300,20 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     
+    permissions:
+      contents: write
+    
     steps:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
         path: artifacts
     
+    - name: Display structure
+      run: ls -R artifacts
+    
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           artifacts/signaling-server-linux/linux-server.tar.gz
@@ -211,5 +321,4 @@ jobs:
           artifacts/p2p-client-linux/linux-client.tar.gz
         draft: false
         prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        generate_release_notes: true

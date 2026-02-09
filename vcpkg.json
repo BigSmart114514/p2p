@@ -3,8 +3,12 @@
     "version-string": "1.0.0",
     "description": "P2P hole punching implementation using libdatachannel",
     "dependencies": [
-        "libdatachannel",
+        {
+            "name": "libdatachannel",
+            "default-features": true
+        },
         "nlohmann-json",
         "openssl"
-    ]
+    ],
+    "builtin-baseline": "c82f74667287d3dc386bce81e44964370c91a289"
 }
