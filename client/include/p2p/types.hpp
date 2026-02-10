@@ -27,6 +27,14 @@ enum class ChannelState {
     Closed
 };
 
+// 中继状态
+enum class RelayState {
+    NotAuthenticated,
+    Authenticating,
+    Authenticated,
+    AuthFailed
+};
+
 // 错误代码
 enum class ErrorCode {
     None = 0,
@@ -36,7 +44,9 @@ enum class ErrorCode {
     ChannelNotOpen,
     Timeout,
     InvalidData,
-    InternalError
+    InternalError,
+    RelayAuthFailed,      // 中继认证失败
+    RelayNotAuthenticated // 未进行中继认证
 };
 
 // 错误信息
@@ -87,6 +97,7 @@ struct Message {
 struct PeerInfo {
     std::string id;
     ChannelState channelState;
+    bool relayMode = false;  // 是否通过中继连接
     bool isConnected() const { return channelState == ChannelState::Open; }
 };
 
@@ -131,5 +142,10 @@ using OnMessageCallback = std::function<void(const std::string& peerId, const Me
 using OnPeerListCallback = std::function<void(const std::vector<std::string>& peers)>;
 using OnErrorCallback = std::function<void(const Error& error)>;
 using OnStateChangeCallback = std::function<void(ConnectionState state)>;
+
+// 中继相关回调
+using OnRelayAuthResultCallback = std::function<void(bool success, const std::string& message)>;
+using OnRelayConnectedCallback = std::function<void(const std::string& peerId)>;
+using OnRelayDisconnectedCallback = std::function<void(const std::string& peerId)>;
 
 } // namespace p2p

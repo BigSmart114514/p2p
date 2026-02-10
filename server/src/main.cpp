@@ -3,27 +3,33 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <memory>
 #include <mutex>
-#include <thread>
-#include <csignal>
-#include <atomic>
+#include <memory>
+#include <fstream>
 #include <sstream>
+#include <algorithm>
 
 #include <rtc/rtc.hpp>
 #include <nlohmann/json.hpp>
+
 #include "protocol.hpp"
 
-using namespace p2p;
 using json = nlohmann::json;
+
+// 客户端信息
+struct ClientInfo {
+    std::shared_ptr<rtc::WebSocket> ws;
+    std::string id;
+    bool relayAuthenticated = false;
+};
 
 class SignalingServer {
 public:
-    SignalingServer(uint16_t port) : port_(port), running_(false) {}
+    SignalingServer(uint16_t port) : port_(port) {
+        loadEnvFile();
+    }
     
-    void start() {
-        running_ = true;
-        
+    void run() {
         rtc::WebSocketServer::Configuration config;
         config.port = port_;
         config.enableTls = false;
@@ -35,208 +41,357 @@ public:
             
             auto clientId = std::make_shared<std::string>();
             
-            ws->onOpen([ws]() {
+            ws->onOpen([this, ws, clientId]() {
                 std::cout << "[Server] WebSocket opened" << std::endl;
             });
             
             ws->onMessage([this, ws, clientId](auto message) {
                 if (std::holds_alternative<std::string>(message)) {
-                    handleMessage(ws, std::get<std::string>(message), clientId);
+                    handleMessage(ws, *clientId, std::get<std::string>(message));
                 }
             });
             
             ws->onClosed([this, clientId]() {
                 if (!clientId->empty()) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    clients_.erase(*clientId);
                     std::cout << "[Server] Client disconnected: " << *clientId << std::endl;
-                    broadcastPeerList();
+                    removeClient(*clientId);
                 }
             });
             
             ws->onError([clientId](const std::string& error) {
-                std::cerr << "[Server] WebSocket error: " << error << std::endl;
+                std::cerr << "[Server] WebSocket error for " << *clientId << ": " << error << std::endl;
             });
         });
         
         std::cout << "[Server] Signaling server started on port " << port_ << std::endl;
+        std::cout << "[Server] Relay password: " << (relayPassword_.empty() ? "(not set)" : "(configured)") << std::endl;
+        
+        // 保持运行
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            if (line == "quit" || line == "exit") {
+                break;
+            } else if (line == "list") {
+                listClients();
+            } else if (line == "relay") {
+                listRelayClients();
+            } else if (line == "help") {
+                std::cout << "Commands: list, relay, quit" << std::endl;
+            }
+        }
+        
+        std::cout << "[Server] Shutting down..." << std::endl;
     }
     
-    void stop() {
-        running_ = false;
-        if (server_) {
-            server_->stop();
+private:
+    void loadEnvFile() {
+        std::ifstream envFile(".env");
+        if (!envFile.is_open()) {
+            std::cout << "[Server] No .env file found, relay will be disabled" << std::endl;
+            return;
+        }
+        
+        std::string line;
+        while (std::getline(envFile, line)) {
+            // 跳过空行和注释
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+            
+            // 移除首尾空白
+            size_t start = line.find_first_not_of(" \t");
+            size_t end = line.find_last_not_of(" \t\r\n");
+            if (start == std::string::npos) {
+                continue;
+            }
+            line = line.substr(start, end - start + 1);
+            
+            // 解析 KEY=VALUE
+            size_t eqPos = line.find('=');
+            if (eqPos == std::string::npos) {
+                continue;
+            }
+            
+            std::string key = line.substr(0, eqPos);
+            std::string value = line.substr(eqPos + 1);
+            
+            // 移除可能的引号
+            if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
+                value = value.substr(1);
+            }
+            if (!value.empty() && (value.back() == '"' || value.back() == '\'')) {
+                value = value.substr(0, value.size() - 1);
+            }
+            
+            if (key == "RELAY_PASSWORD") {
+                relayPassword_ = value;
+                std::cout << "[Server] Relay password loaded from .env" << std::endl;
+            }
         }
     }
     
-    bool isRunning() const { return running_; }
-
-private:
-    void handleMessage(std::shared_ptr<rtc::WebSocket> ws, 
-                       const std::string& msgStr,
-                       std::shared_ptr<std::string> clientId) {
+    void handleMessage(std::shared_ptr<rtc::WebSocket> ws, std::string& clientId, 
+                       const std::string& msgStr) {
         try {
-            auto msg = SignalingMessage::deserialize(msgStr);
+            auto msg = p2p::SignalingMessage::deserialize(msgStr);
             
             switch (msg.type) {
-                case MessageType::Register:
-                    handleRegister(ws, msg, clientId);
+                case p2p::MessageType::Register:
+                    handleRegister(ws, clientId, msg);
                     break;
                     
-                case MessageType::PeerList:
-                    sendPeerList(ws, *clientId);
+                case p2p::MessageType::PeerList:
+                    handlePeerList(ws, clientId);
                     break;
                     
-                case MessageType::Offer:
-                case MessageType::Answer:
-                case MessageType::Candidate:
-                    forwardMessage(msg);
+                case p2p::MessageType::Offer:
+                case p2p::MessageType::Answer:
+                case p2p::MessageType::Candidate:
+                    handleSignaling(clientId, msg);
                     break;
                     
-                case MessageType::Connect:
-                    handleConnectRequest(ws, msg, *clientId);
+                case p2p::MessageType::RelayAuth:
+                    handleRelayAuth(ws, clientId, msg);
+                    break;
+                    
+                case p2p::MessageType::RelayConnect:
+                    handleRelayConnect(clientId, msg);
+                    break;
+                    
+                case p2p::MessageType::RelayData:
+                    handleRelayData(clientId, msg);
+                    break;
+                    
+                case p2p::MessageType::RelayDisconnect:
+                    handleRelayDisconnect(clientId, msg);
                     break;
                     
                 default:
-                    std::cerr << "[Server] Unknown message type" << std::endl;
+                    break;
             }
         } catch (const std::exception& e) {
             std::cerr << "[Server] Error handling message: " << e.what() << std::endl;
         }
     }
     
-    void handleRegister(std::shared_ptr<rtc::WebSocket> ws, 
-                        const SignalingMessage& msg,
-                        std::shared_ptr<std::string> clientId) {
-        std::string peerId = msg.payload;
+    void handleRegister(std::shared_ptr<rtc::WebSocket> ws, std::string& clientId, 
+                        const p2p::SignalingMessage& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
         
-        if (peerId.empty()) {
-            // 生成唯一ID
-            static std::atomic<int> counter{0};
-            peerId = "peer_" + std::to_string(++counter);
-        }
+        std::string requestedId = msg.payload;
         
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            
-            // 检查是否已存在
-            if (clients_.find(peerId) != clients_.end()) {
-                SignalingMessage errorMsg;
-                errorMsg.type = MessageType::Error;
-                errorMsg.payload = "Peer ID already exists";
-                ws->send(errorMsg.serialize());
-                return;
+        // 如果请求特定ID，检查是否可用
+        if (!requestedId.empty()) {
+            if (clients_.count(requestedId)) {
+                // ID已被使用，生成新ID
+                clientId = generateClientId();
+            } else {
+                clientId = requestedId;
             }
-            
-            *clientId = peerId;
-            clients_[peerId] = ws;
+        } else {
+            clientId = generateClientId();
         }
         
-        std::cout << "[Server] Client registered: " << peerId << std::endl;
+        ClientInfo info;
+        info.ws = ws;
+        info.id = clientId;
+        info.relayAuthenticated = false;
+        clients_[clientId] = info;
+        
+        std::cout << "[Server] Client registered: " << clientId << std::endl;
         
         // 发送注册确认
-        SignalingMessage response;
-        response.type = MessageType::Register;
-        response.payload = peerId;
+        p2p::SignalingMessage response;
+        response.type = p2p::MessageType::Register;
+        response.payload = clientId;
         ws->send(response.serialize());
-        
-        // 广播新的peer列表
-        broadcastPeerList();
     }
     
-    void sendPeerList(std::shared_ptr<rtc::WebSocket> ws, const std::string& excludeId) {
+    void handlePeerList(std::shared_ptr<rtc::WebSocket> ws, const std::string& clientId) {
         std::lock_guard<std::mutex> lock(mutex_);
         
-        json peerList = json::array();
-        for (const auto& [id, client] : clients_) {
-            if (id != excludeId) {
-                peerList.push_back(id);
+        json peers = json::array();
+        for (const auto& [id, info] : clients_) {
+            if (id != clientId) {
+                peers.push_back(id);
             }
         }
         
-        SignalingMessage msg;
-        msg.type = MessageType::PeerList;
-        msg.payload = peerList.dump();
-        ws->send(msg.serialize());
+        p2p::SignalingMessage response;
+        response.type = p2p::MessageType::PeerList;
+        response.payload = peers.dump();
+        ws->send(response.serialize());
     }
     
-    void broadcastPeerList() {
-        json peerList = json::array();
-        for (const auto& [id, client] : clients_) {
-            peerList.push_back(id);
-        }
-        
-        for (const auto& [id, client] : clients_) {
-            json filteredList = json::array();
-            for (const auto& peerId : peerList) {
-                if (peerId != id) {
-                    filteredList.push_back(peerId);
-                }
-            }
-            
-            SignalingMessage msg;
-            msg.type = MessageType::PeerList;
-            msg.payload = filteredList.dump();
-            
-            if (client && client->isOpen()) {
-                client->send(msg.serialize());
-            }
-        }
-    }
-    
-    void forwardMessage(const SignalingMessage& msg) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        auto it = clients_.find(msg.to);
-        if (it != clients_.end() && it->second && it->second->isOpen()) {
-            it->second->send(msg.serialize());
-            std::cout << "[Server] Forwarded " << messageTypeToString(msg.type) 
-                      << " from " << msg.from << " to " << msg.to << std::endl;
-        } else {
-            std::cerr << "[Server] Target peer not found: " << msg.to << std::endl;
-        }
-    }
-    
-    void handleConnectRequest(std::shared_ptr<rtc::WebSocket> ws,
-                              const SignalingMessage& msg,
-                              const std::string& fromId) {
+    void handleSignaling(const std::string& fromId, const p2p::SignalingMessage& msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         
         auto it = clients_.find(msg.to);
         if (it != clients_.end()) {
-            SignalingMessage response;
-            response.type = MessageType::Connect;
-            response.from = fromId;
-            response.to = msg.to;
-            response.payload = "connect_request";
-            
-            if (it->second && it->second->isOpen()) {
-                it->second->send(response.serialize());
-            }
+            p2p::SignalingMessage fwdMsg = msg;
+            fwdMsg.from = fromId;
+            it->second.ws->send(fwdMsg.serialize());
         } else {
-            SignalingMessage errorMsg;
-            errorMsg.type = MessageType::Error;
-            errorMsg.payload = "Peer not found: " + msg.to;
-            ws->send(errorMsg.serialize());
+            // 目标不存在，发送错误
+            auto clientIt = clients_.find(fromId);
+            if (clientIt != clients_.end()) {
+                p2p::SignalingMessage errorMsg;
+                errorMsg.type = p2p::MessageType::Error;
+                errorMsg.payload = "Peer not found: " + msg.to;
+                clientIt->second.ws->send(errorMsg.serialize());
+            }
+        }
+    }
+    
+    void handleRelayAuth(std::shared_ptr<rtc::WebSocket> ws, const std::string& clientId,
+                         const p2p::SignalingMessage& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        std::string providedPassword = msg.payload;
+        bool success = false;
+        std::string message;
+        
+        if (relayPassword_.empty()) {
+            success = false;
+            message = "Relay is not configured on this server";
+        } else if (providedPassword == relayPassword_) {
+            success = true;
+            message = "Authentication successful";
+            
+            auto it = clients_.find(clientId);
+            if (it != clients_.end()) {
+                it->second.relayAuthenticated = true;
+            }
+            
+            std::cout << "[Server] Relay auth successful for: " << clientId << std::endl;
+        } else {
+            success = false;
+            message = "Invalid password";
+            std::cout << "[Server] Relay auth failed for: " << clientId << std::endl;
+        }
+        
+        p2p::SignalingMessage response;
+        response.type = p2p::MessageType::RelayAuthResult;
+        response.payload = json({
+            {"success", success},
+            {"message", message}
+        }).dump();
+        ws->send(response.serialize());
+    }
+    
+    void handleRelayConnect(const std::string& fromId, const p2p::SignalingMessage& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // 检查发送者是否已认证
+        auto fromIt = clients_.find(fromId);
+        if (fromIt == clients_.end() || !fromIt->second.relayAuthenticated) {
+            sendError(fromId, "Not authenticated for relay");
+            return;
+        }
+        
+        // 检查目标是否存在
+        auto toIt = clients_.find(msg.to);
+        if (toIt == clients_.end()) {
+            sendError(fromId, "Peer not found: " + msg.to);
+            return;
+        }
+        
+        // 通知目标客户端有新的中继连接
+        p2p::SignalingMessage notifyMsg;
+        notifyMsg.type = p2p::MessageType::RelayConnect;
+        notifyMsg.from = fromId;
+        notifyMsg.to = msg.to;
+        toIt->second.ws->send(notifyMsg.serialize());
+        
+        std::cout << "[Server] Relay connection: " << fromId << " -> " << msg.to << std::endl;
+    }
+    
+    void handleRelayData(const std::string& fromId, const p2p::SignalingMessage& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // 检查发送者是否已认证
+        auto fromIt = clients_.find(fromId);
+        if (fromIt == clients_.end() || !fromIt->second.relayAuthenticated) {
+            sendError(fromId, "Not authenticated for relay");
+            return;
+        }
+        
+        // 转发数据到目标
+        auto toIt = clients_.find(msg.to);
+        if (toIt == clients_.end()) {
+            sendError(fromId, "Peer not found: " + msg.to);
+            return;
+        }
+        
+        // 转发消息
+        p2p::SignalingMessage fwdMsg = msg;
+        fwdMsg.from = fromId;
+        toIt->second.ws->send(fwdMsg.serialize());
+    }
+    
+    void handleRelayDisconnect(const std::string& fromId, const p2p::SignalingMessage& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // 通知目标客户端中继连接断开
+        auto toIt = clients_.find(msg.to);
+        if (toIt != clients_.end()) {
+            p2p::SignalingMessage notifyMsg;
+            notifyMsg.type = p2p::MessageType::RelayDisconnect;
+            notifyMsg.from = fromId;
+            notifyMsg.to = msg.to;
+            toIt->second.ws->send(notifyMsg.serialize());
+        }
+        
+        std::cout << "[Server] Relay disconnect: " << fromId << " -> " << msg.to << std::endl;
+    }
+    
+    void sendError(const std::string& clientId, const std::string& message) {
+        auto it = clients_.find(clientId);
+        if (it != clients_.end()) {
+            p2p::SignalingMessage errorMsg;
+            errorMsg.type = p2p::MessageType::Error;
+            errorMsg.payload = message;
+            it->second.ws->send(errorMsg.serialize());
+        }
+    }
+    
+    void removeClient(const std::string& clientId) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        clients_.erase(clientId);
+    }
+    
+    std::string generateClientId() {
+        static int counter = 0;
+        return "peer_" + std::to_string(++counter);
+    }
+    
+    void listClients() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::cout << "Connected clients (" << clients_.size() << "):" << std::endl;
+        for (const auto& [id, info] : clients_) {
+            std::cout << "  - " << id 
+                      << (info.relayAuthenticated ? " [relay]" : "") 
+                      << std::endl;
+        }
+    }
+    
+    void listRelayClients() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::cout << "Relay authenticated clients:" << std::endl;
+        for (const auto& [id, info] : clients_) {
+            if (info.relayAuthenticated) {
+                std::cout << "  - " << id << std::endl;
+            }
         }
     }
 
 private:
     uint16_t port_;
-    std::atomic<bool> running_;
+    std::string relayPassword_;
     std::unique_ptr<rtc::WebSocketServer> server_;
-    std::unordered_map<std::string, std::shared_ptr<rtc::WebSocket>> clients_;
+    std::unordered_map<std::string, ClientInfo> clients_;
     std::mutex mutex_;
 };
-
-std::unique_ptr<SignalingServer> g_server;
-
-void signalHandler(int signal) {
-    std::cout << "\n[Server] Shutting down..." << std::endl;
-    if (g_server) {
-        g_server->stop();
-    }
-}
 
 int main(int argc, char* argv[]) {
     uint16_t port = 8080;
@@ -245,21 +400,14 @@ int main(int argc, char* argv[]) {
         port = static_cast<uint16_t>(std::stoi(argv[1]));
     }
     
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-    
     try {
-        rtc::InitLogger(rtc::LogLevel::Info);
+        rtc::InitLogger(rtc::LogLevel::Warning);
         
-        g_server = std::make_unique<SignalingServer>(port);
-        g_server->start();
+        SignalingServer server(port);
+        server.run();
         
-        // 保持运行
-        while (g_server->isRunning()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
     } catch (const std::exception& e) {
-        std::cerr << "[Server] Fatal error: " << e.what() << std::endl;
+        std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
     

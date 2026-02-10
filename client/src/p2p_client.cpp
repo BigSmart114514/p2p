@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 #include <thread>
 
 namespace p2p {
@@ -61,6 +62,7 @@ public:
     explicit P2PClientImpl(const ClientConfig& config)
         : config_(config)
         , state_(ConnectionState::Disconnected)
+        , relayState_(RelayState::NotAuthenticated)
         , running_(false)
     {
         // 配置 RTC - STUN 服务器
@@ -120,6 +122,7 @@ public:
             ws_->onClosed([this]() {
                 std::cout << "[P2P] Disconnected from signaling server" << std::endl;
                 setState(ConnectionState::Disconnected);
+                setRelayState(RelayState::NotAuthenticated);
                 
                 if (onDisconnected_) {
                     onDisconnected_(Error{ErrorCode::None, "Connection closed"});
@@ -177,6 +180,7 @@ public:
             }
             peerConnections_.clear();
             dataChannels_.clear();
+            relayPeers_.clear();
         }
         
         if (ws_ && ws_->isOpen()) {
@@ -184,6 +188,7 @@ public:
         }
         
         setState(ConnectionState::Disconnected);
+        setRelayState(RelayState::NotAuthenticated);
     }
     
     bool isConnected() const {
@@ -271,25 +276,37 @@ public:
     
     std::optional<PeerInfo> getPeerInfo(const std::string& peerId) const {
         std::lock_guard<std::mutex> lock(peerMutex_);
+        
+        // 检查直连
         auto it = dataChannels_.find(peerId);
-        if (it == dataChannels_.end()) {
-            return std::nullopt;
+        if (it != dataChannels_.end()) {
+            PeerInfo info;
+            info.id = peerId;
+            info.relayMode = false;
+            if (it->second) {
+                if (it->second->isOpen()) {
+                    info.channelState = ChannelState::Open;
+                } else if (it->second->isClosed()) {
+                    info.channelState = ChannelState::Closed;
+                } else {
+                    info.channelState = ChannelState::Connecting;
+                }
+            } else {
+                info.channelState = ChannelState::Closed;
+            }
+            return info;
         }
         
-        PeerInfo info;
-        info.id = peerId;
-        if (it->second) {
-            if (it->second->isOpen()) {
-                info.channelState = ChannelState::Open;
-            } else if (it->second->isClosed()) {
-                info.channelState = ChannelState::Closed;
-            } else {
-                info.channelState = ChannelState::Connecting;
-            }
-        } else {
-            info.channelState = ChannelState::Closed;
+        // 检查中继连接
+        if (relayPeers_.count(peerId)) {
+            PeerInfo info;
+            info.id = peerId;
+            info.relayMode = true;
+            info.channelState = ChannelState::Open;
+            return info;
         }
-        return info;
+        
+        return std::nullopt;
     }
     
     bool sendText(const std::string& peerId, const std::string& message) {
@@ -396,6 +413,243 @@ public:
         return count;
     }
     
+    // ==================== 中继功能 ====================
+    
+    bool authenticateRelay(const std::string& password) {
+        if (!isConnected()) {
+            if (onError_) {
+                onError_(Error{ErrorCode::ConnectionFailed, "Not connected to signaling server"});
+            }
+            return false;
+        }
+        
+        setRelayState(RelayState::Authenticating);
+        
+        SignalingMessage msg;
+        msg.type = MessageType::RelayAuth;
+        msg.from = localId_;
+        msg.payload = password;
+        
+        ws_->send(msg.serialize());
+        
+        // 等待认证结果
+        auto timeout = std::chrono::milliseconds(config_.connectionTimeout);
+        auto start = std::chrono::steady_clock::now();
+        
+        while (relayState_ == RelayState::Authenticating) {
+            if (std::chrono::steady_clock::now() - start > timeout) {
+                setRelayState(RelayState::AuthFailed);
+                if (onError_) {
+                    onError_(Error{ErrorCode::Timeout, "Relay authentication timeout"});
+                }
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        
+        return relayState_ == RelayState::Authenticated;
+    }
+    
+    std::future<bool> authenticateRelayAsync(const std::string& password, std::chrono::milliseconds timeout) {
+        return std::async(std::launch::async, [this, password, timeout]() {
+            if (!isConnected()) {
+                if (onError_) {
+                    onError_(Error{ErrorCode::ConnectionFailed, "Not connected to signaling server"});
+                }
+                return false;
+            }
+            
+            setRelayState(RelayState::Authenticating);
+            
+            SignalingMessage msg;
+            msg.type = MessageType::RelayAuth;
+            msg.from = localId_;
+            msg.payload = password;
+            
+            ws_->send(msg.serialize());
+            
+            auto start = std::chrono::steady_clock::now();
+            
+            while (relayState_ == RelayState::Authenticating) {
+                if (std::chrono::steady_clock::now() - start > timeout) {
+                    setRelayState(RelayState::AuthFailed);
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            
+            return relayState_ == RelayState::Authenticated;
+        });
+    }
+    
+    RelayState getRelayState() const {
+        return relayState_;
+    }
+    
+    bool isRelayAuthenticated() const {
+        return relayState_ == RelayState::Authenticated;
+    }
+    
+    bool connectToPeerViaRelay(const std::string& peerId) {
+        if (!isRelayAuthenticated()) {
+            if (onError_) {
+                onError_(Error{ErrorCode::RelayNotAuthenticated, "Not authenticated for relay"});
+            }
+            return false;
+        }
+        
+        SignalingMessage msg;
+        msg.type = MessageType::RelayConnect;
+        msg.from = localId_;
+        msg.to = peerId;
+        
+        ws_->send(msg.serialize());
+        
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            relayPeers_.insert(peerId);
+        }
+        
+        std::cout << "[P2P] Relay connected to " << peerId << std::endl;
+        
+        if (onRelayConnected_) {
+            onRelayConnected_(peerId);
+        }
+        
+        return true;
+    }
+    
+    void disconnectFromPeerViaRelay(const std::string& peerId) {
+        SignalingMessage msg;
+        msg.type = MessageType::RelayDisconnect;
+        msg.from = localId_;
+        msg.to = peerId;
+        
+        if (ws_ && ws_->isOpen()) {
+            ws_->send(msg.serialize());
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            relayPeers_.erase(peerId);
+        }
+        
+        if (onRelayDisconnected_) {
+            onRelayDisconnected_(peerId);
+        }
+    }
+    
+    bool sendTextViaRelay(const std::string& peerId, const std::string& message) {
+        if (!isRelayAuthenticated()) {
+            if (onError_) {
+                onError_(Error{ErrorCode::RelayNotAuthenticated, "Not authenticated for relay"});
+            }
+            return false;
+        }
+        
+        RelayDataMessage dataMsg;
+        dataMsg.isBinary = false;
+        dataMsg.textData = message;
+        
+        SignalingMessage msg;
+        msg.type = MessageType::RelayData;
+        msg.from = localId_;
+        msg.to = peerId;
+        msg.payload = dataMsg.serialize();
+        
+        try {
+            ws_->send(msg.serialize());
+            return true;
+        } catch (const std::exception& e) {
+            if (onError_) {
+                onError_(Error{ErrorCode::InternalError, e.what()});
+            }
+            return false;
+        }
+    }
+    
+    bool sendBinaryViaRelay(const std::string& peerId, const BinaryData& data) {
+        if (!isRelayAuthenticated()) {
+            if (onError_) {
+                onError_(Error{ErrorCode::RelayNotAuthenticated, "Not authenticated for relay"});
+            }
+            return false;
+        }
+        
+        RelayDataMessage dataMsg;
+        dataMsg.isBinary = true;
+        dataMsg.binaryBase64 = base64Encode(data);
+        
+        SignalingMessage msg;
+        msg.type = MessageType::RelayData;
+        msg.from = localId_;
+        msg.to = peerId;
+        msg.payload = dataMsg.serialize();
+        
+        try {
+            ws_->send(msg.serialize());
+            return true;
+        } catch (const std::exception& e) {
+            if (onError_) {
+                onError_(Error{ErrorCode::InternalError, e.what()});
+            }
+            return false;
+        }
+    }
+    
+    bool sendBinaryViaRelay(const std::string& peerId, const void* data, size_t size) {
+        BinaryData binaryData(static_cast<const uint8_t*>(data),
+                              static_cast<const uint8_t*>(data) + size);
+        return sendBinaryViaRelay(peerId, binaryData);
+    }
+    
+    bool sendViaRelay(const std::string& peerId, const Message& message) {
+        if (message.type == Message::Type::Text) {
+            return sendTextViaRelay(peerId, message.text);
+        } else {
+            return sendBinaryViaRelay(peerId, message.binary);
+        }
+    }
+    
+    size_t broadcastTextViaRelay(const std::string& message) {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        size_t count = 0;
+        
+        for (const auto& peerId : relayPeers_) {
+            // 临时解锁以避免死锁
+            peerMutex_.unlock();
+            if (sendTextViaRelay(peerId, message)) {
+                ++count;
+            }
+            peerMutex_.lock();
+        }
+        return count;
+    }
+    
+    size_t broadcastBinaryViaRelay(const BinaryData& data) {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        size_t count = 0;
+        
+        for (const auto& peerId : relayPeers_) {
+            peerMutex_.unlock();
+            if (sendBinaryViaRelay(peerId, data)) {
+                ++count;
+            }
+            peerMutex_.lock();
+        }
+        return count;
+    }
+    
+    std::vector<std::string> getRelayConnectedPeers() const {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        return std::vector<std::string>(relayPeers_.begin(), relayPeers_.end());
+    }
+    
+    bool isPeerRelayConnected(const std::string& peerId) const {
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        return relayPeers_.count(peerId) > 0;
+    }
+    
     // 回调设置
     void setOnConnected(OnConnectedCallback cb) { onConnected_ = std::move(cb); }
     void setOnDisconnected(OnDisconnectedCallback cb) { onDisconnected_ = std::move(cb); }
@@ -407,6 +661,9 @@ public:
     void setOnPeerList(OnPeerListCallback cb) { onPeerList_ = std::move(cb); }
     void setOnError(OnErrorCallback cb) { onError_ = std::move(cb); }
     void setOnStateChange(OnStateChangeCallback cb) { onStateChange_ = std::move(cb); }
+    void setOnRelayAuthResult(OnRelayAuthResultCallback cb) { onRelayAuthResult_ = std::move(cb); }
+    void setOnRelayConnected(OnRelayConnectedCallback cb) { onRelayConnected_ = std::move(cb); }
+    void setOnRelayDisconnected(OnRelayDisconnectedCallback cb) { onRelayDisconnected_ = std::move(cb); }
     
 private:
     void setState(ConnectionState newState) {
@@ -416,6 +673,10 @@ private:
                 onStateChange_(state_);
             }
         }
+    }
+    
+    void setRelayState(RelayState newState) {
+        relayState_ = newState;
     }
     
     void handleSignalingMessage(const std::string& msgStr) {
@@ -453,6 +714,22 @@ private:
                     handleCandidate(msg);
                     break;
                     
+                case MessageType::RelayAuthResult:
+                    handleRelayAuthResult(msg);
+                    break;
+                    
+                case MessageType::RelayData:
+                    handleRelayData(msg);
+                    break;
+                    
+                case MessageType::RelayConnect:
+                    handleRelayConnect(msg);
+                    break;
+                    
+                case MessageType::RelayDisconnect:
+                    handleRelayDisconnect(msg);
+                    break;
+                    
                 case MessageType::Error:
                     if (onError_) {
                         onError_(Error{ErrorCode::SignalingError, msg.payload});
@@ -469,16 +746,89 @@ private:
         }
     }
     
+    void handleRelayAuthResult(const SignalingMessage& msg) {
+        auto resultJson = json::parse(msg.payload);
+        bool success = resultJson.value("success", false);
+        std::string message = resultJson.value("message", "");
+        
+        if (success) {
+            setRelayState(RelayState::Authenticated);
+            std::cout << "[P2P] Relay authentication successful" << std::endl;
+        } else {
+            setRelayState(RelayState::AuthFailed);
+            std::cerr << "[P2P] Relay authentication failed: " << message << std::endl;
+            if (onError_) {
+                onError_(Error{ErrorCode::RelayAuthFailed, message});
+            }
+        }
+        
+        if (onRelayAuthResult_) {
+            onRelayAuthResult_(success, message);
+        }
+    }
+    
+    void handleRelayData(const SignalingMessage& msg) {
+        try {
+            auto dataMsg = RelayDataMessage::deserialize(msg.payload);
+            
+            if (dataMsg.isBinary) {
+                BinaryData data = base64Decode(dataMsg.binaryBase64);
+                
+                if (onBinaryMessage_) {
+                    onBinaryMessage_(msg.from, data);
+                }
+                if (onMessage_) {
+                    onMessage_(msg.from, Message::fromBinary(data));
+                }
+            } else {
+                if (onTextMessage_) {
+                    onTextMessage_(msg.from, dataMsg.textData);
+                }
+                if (onMessage_) {
+                    onMessage_(msg.from, Message::fromText(dataMsg.textData));
+                }
+            }
+        } catch (const std::exception& e) {
+            if (onError_) {
+                onError_(Error{ErrorCode::InvalidData, "Failed to parse relay data: " + std::string(e.what())});
+            }
+        }
+    }
+    
+    void handleRelayConnect(const SignalingMessage& msg) {
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            relayPeers_.insert(msg.from);
+        }
+        
+        std::cout << "[P2P] Peer " << msg.from << " connected via relay" << std::endl;
+        
+        if (onRelayConnected_) {
+            onRelayConnected_(msg.from);
+        }
+    }
+    
+    void handleRelayDisconnect(const SignalingMessage& msg) {
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            relayPeers_.erase(msg.from);
+        }
+        
+        std::cout << "[P2P] Peer " << msg.from << " disconnected from relay" << std::endl;
+        
+        if (onRelayDisconnected_) {
+            onRelayDisconnected_(msg.from);
+        }
+    }
+    
     void createPeerConnection(const std::string& peerId, bool initiator) {
         auto pc = std::make_shared<rtc::PeerConnection>(rtcConfig_);
         
-        // 先将 PeerConnection 加入 map（在锁内）
         {
             std::lock_guard<std::mutex> lock(peerMutex_);
             peerConnections_[peerId] = pc;
         }
         
-        // 设置回调（在锁外，避免回调中的死锁）
         pc->onLocalDescription([this, peerId, initiator](rtc::Description description) {
             SignalingMessage msg;
             msg.type = initiator ? MessageType::Offer : MessageType::Answer;
@@ -528,18 +878,16 @@ private:
         
         if (initiator) {
             auto dc = pc->createDataChannel("p2p-channel");
-            setupDataChannel(peerId, dc);  // 现在安全了，因为没有在锁内调用
+            setupDataChannel(peerId, dc);
         }
     }
     
     void setupDataChannel(const std::string& peerId, std::shared_ptr<rtc::DataChannel> dc) {
-        // 先将 DataChannel 加入 map
         {
             std::lock_guard<std::mutex> lock(peerMutex_);
             dataChannels_[peerId] = dc;
         }
         
-        // 设置回调（在锁外）
         dc->onOpen([this, peerId]() {
             std::cout << "[P2P] DataChannel opened with " << peerId << std::endl;
             if (onPeerConnected_) {
@@ -626,6 +974,7 @@ private:
 private:
     ClientConfig config_;
     std::atomic<ConnectionState> state_;
+    std::atomic<RelayState> relayState_;
     std::atomic<bool> running_;
     std::string localId_;
     
@@ -634,6 +983,7 @@ private:
     
     std::unordered_map<std::string, std::shared_ptr<rtc::PeerConnection>> peerConnections_;
     std::unordered_map<std::string, std::shared_ptr<rtc::DataChannel>> dataChannels_;
+    std::unordered_set<std::string> relayPeers_;  // 通过中继连接的 Peer
     mutable std::mutex peerMutex_;
     
     // 回调
@@ -647,6 +997,9 @@ private:
     OnPeerListCallback onPeerList_;
     OnErrorCallback onError_;
     OnStateChangeCallback onStateChange_;
+    OnRelayAuthResultCallback onRelayAuthResult_;
+    OnRelayConnectedCallback onRelayConnected_;
+    OnRelayDisconnectedCallback onRelayDisconnected_;
 };
 
 // ==================== P2PClient 实现 ====================
@@ -697,6 +1050,34 @@ bool P2PClient::send(const std::string& peerId, const Message& message) {
 size_t P2PClient::broadcastText(const std::string& message) { return impl_->broadcastText(message); }
 size_t P2PClient::broadcastBinary(const BinaryData& data) { return impl_->broadcastBinary(data); }
 
+// 中继功能实现
+bool P2PClient::authenticateRelay(const std::string& password) {
+    return impl_->authenticateRelay(password);
+}
+std::future<bool> P2PClient::authenticateRelayAsync(const std::string& password, std::chrono::milliseconds timeout) {
+    return impl_->authenticateRelayAsync(password, timeout);
+}
+RelayState P2PClient::getRelayState() const { return impl_->getRelayState(); }
+bool P2PClient::isRelayAuthenticated() const { return impl_->isRelayAuthenticated(); }
+bool P2PClient::connectToPeerViaRelay(const std::string& peerId) { return impl_->connectToPeerViaRelay(peerId); }
+void P2PClient::disconnectFromPeerViaRelay(const std::string& peerId) { impl_->disconnectFromPeerViaRelay(peerId); }
+bool P2PClient::sendTextViaRelay(const std::string& peerId, const std::string& message) {
+    return impl_->sendTextViaRelay(peerId, message);
+}
+bool P2PClient::sendBinaryViaRelay(const std::string& peerId, const BinaryData& data) {
+    return impl_->sendBinaryViaRelay(peerId, data);
+}
+bool P2PClient::sendBinaryViaRelay(const std::string& peerId, const void* data, size_t size) {
+    return impl_->sendBinaryViaRelay(peerId, data, size);
+}
+bool P2PClient::sendViaRelay(const std::string& peerId, const Message& message) {
+    return impl_->sendViaRelay(peerId, message);
+}
+size_t P2PClient::broadcastTextViaRelay(const std::string& message) { return impl_->broadcastTextViaRelay(message); }
+size_t P2PClient::broadcastBinaryViaRelay(const BinaryData& data) { return impl_->broadcastBinaryViaRelay(data); }
+std::vector<std::string> P2PClient::getRelayConnectedPeers() const { return impl_->getRelayConnectedPeers(); }
+bool P2PClient::isPeerRelayConnected(const std::string& peerId) const { return impl_->isPeerRelayConnected(peerId); }
+
 void P2PClient::setOnConnected(OnConnectedCallback cb) { impl_->setOnConnected(std::move(cb)); }
 void P2PClient::setOnDisconnected(OnDisconnectedCallback cb) { impl_->setOnDisconnected(std::move(cb)); }
 void P2PClient::setOnPeerConnected(OnPeerConnectedCallback cb) { impl_->setOnPeerConnected(std::move(cb)); }
@@ -707,6 +1088,9 @@ void P2PClient::setOnMessage(OnMessageCallback cb) { impl_->setOnMessage(std::mo
 void P2PClient::setOnPeerList(OnPeerListCallback cb) { impl_->setOnPeerList(std::move(cb)); }
 void P2PClient::setOnError(OnErrorCallback cb) { impl_->setOnError(std::move(cb)); }
 void P2PClient::setOnStateChange(OnStateChangeCallback cb) { impl_->setOnStateChange(std::move(cb)); }
+void P2PClient::setOnRelayAuthResult(OnRelayAuthResultCallback cb) { impl_->setOnRelayAuthResult(std::move(cb)); }
+void P2PClient::setOnRelayConnected(OnRelayConnectedCallback cb) { impl_->setOnRelayConnected(std::move(cb)); }
+void P2PClient::setOnRelayDisconnected(OnRelayDisconnectedCallback cb) { impl_->setOnRelayDisconnected(std::move(cb)); }
 
 void P2PClient::setLogLevel(int level) {
     rtc::LogLevel rtcLevel;

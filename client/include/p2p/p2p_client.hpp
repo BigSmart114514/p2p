@@ -16,6 +16,7 @@ class P2PClientImpl;
  * P2P 客户端类
  * 
  * 提供 P2P 通信功能，支持文本和二进制数据传输。
+ * 支持直接 P2P 连接和通过服务端中继连接两种模式。
  * 
  * 使用示例:
  * @code
@@ -29,8 +30,15 @@ class P2PClientImpl;
  * });
  * 
  * if (client.connect()) {
+ *     // 直接 P2P 连接
  *     client.connectToPeer("other_peer");
  *     client.sendText("other_peer", "Hello!");
+ *     
+ *     // 或者使用中继模式
+ *     if (client.authenticateRelay("password123")) {
+ *         client.connectToPeerViaRelay("other_peer");
+ *         client.sendTextViaRelay("other_peer", "Hello via relay!");
+ *     }
  * }
  * @endcode
  */
@@ -187,6 +195,105 @@ public:
      */
     size_t broadcastBinary(const BinaryData& data);
     
+    // ==================== 中继模式 ====================
+    
+    /**
+     * 进行中继认证
+     * @param password 中继密码
+     * @return 认证成功返回 true
+     */
+    bool authenticateRelay(const std::string& password);
+    
+    /**
+     * 异步进行中继认证
+     * @param password 中继密码
+     * @param timeout 超时时间
+     * @return future 包含认证结果
+     */
+    std::future<bool> authenticateRelayAsync(const std::string& password,
+                                              std::chrono::milliseconds timeout = std::chrono::seconds(10));
+    
+    /**
+     * 获取中继认证状态
+     */
+    RelayState getRelayState() const;
+    
+    /**
+     * 检查是否已完成中继认证
+     */
+    bool isRelayAuthenticated() const;
+    
+    /**
+     * 通过中继连接到 Peer
+     * @param peerId 目标 Peer ID
+     * @return 成功返回 true
+     */
+    bool connectToPeerViaRelay(const std::string& peerId);
+    
+    /**
+     * 断开中继连接
+     * @param peerId 目标 Peer ID
+     */
+    void disconnectFromPeerViaRelay(const std::string& peerId);
+    
+    /**
+     * 通过中继发送文本消息
+     * @param peerId 目标 Peer ID
+     * @param message 文本内容
+     * @return 发送成功返回 true
+     */
+    bool sendTextViaRelay(const std::string& peerId, const std::string& message);
+    
+    /**
+     * 通过中继发送二进制数据
+     * @param peerId 目标 Peer ID
+     * @param data 二进制数据
+     * @return 发送成功返回 true
+     */
+    bool sendBinaryViaRelay(const std::string& peerId, const BinaryData& data);
+    
+    /**
+     * 通过中继发送二进制数据 (原始指针版本)
+     * @param peerId 目标 Peer ID
+     * @param data 数据指针
+     * @param size 数据大小
+     * @return 发送成功返回 true
+     */
+    bool sendBinaryViaRelay(const std::string& peerId, const void* data, size_t size);
+    
+    /**
+     * 通过中继发送通用消息
+     * @param peerId 目标 Peer ID
+     * @param message 消息对象
+     * @return 发送成功返回 true
+     */
+    bool sendViaRelay(const std::string& peerId, const Message& message);
+    
+    /**
+     * 通过中继广播文本消息
+     * @param message 文本内容
+     * @return 成功发送的 Peer 数量
+     */
+    size_t broadcastTextViaRelay(const std::string& message);
+    
+    /**
+     * 通过中继广播二进制数据
+     * @param data 二进制数据
+     * @return 成功发送的 Peer 数量
+     */
+    size_t broadcastBinaryViaRelay(const BinaryData& data);
+    
+    /**
+     * 获取通过中继连接的 Peer 列表
+     */
+    std::vector<std::string> getRelayConnectedPeers() const;
+    
+    /**
+     * 检查是否通过中继与 Peer 连接
+     * @param peerId 目标 Peer ID
+     */
+    bool isPeerRelayConnected(const std::string& peerId) const;
+    
     // ==================== 序列化辅助方法 ====================
     
     /**
@@ -253,6 +360,21 @@ public:
      * 设置状态变更回调
      */
     void setOnStateChange(OnStateChangeCallback callback);
+    
+    /**
+     * 设置中继认证结果回调
+     */
+    void setOnRelayAuthResult(OnRelayAuthResultCallback callback);
+    
+    /**
+     * 设置中继 Peer 连接回调
+     */
+    void setOnRelayConnected(OnRelayConnectedCallback callback);
+    
+    /**
+     * 设置中继 Peer 断开回调
+     */
+    void setOnRelayDisconnected(OnRelayDisconnectedCallback callback);
     
     // ==================== 工具方法 ====================
     
