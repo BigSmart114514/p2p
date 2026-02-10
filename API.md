@@ -1,4 +1,3 @@
-
 # P2P Client Library API 手册
 
 ## 目录
@@ -23,14 +22,22 @@ P2P Client Library 是一个基于 WebRTC DataChannel 的点对点通信库，�
 - NAT 穿透 (通过 STUN/TURN)
 - 多 Peer 同时连接
 - 异步事件回调
+- **服务端中继模式** (需密码认证)
 
-### 1.1 依赖
+### 1.1 通信模式
+
+| 模式 | 描述 | 优点 | 缺点 |
+|-----|------|------|------|
+| P2P 直连 | 通过 WebRTC DataChannel 直接连接 | 低延迟、无服务器负载 | 需要 NAT 穿透 |
+| 服务端中继 | 数据通过信令服务器转发 | 100% 连通性 | 延迟较高、服务器负载 |
+
+### 1.2 依赖
 
 - libdatachannel
 - OpenSSL
 - nlohmann_json
 
-### 1.2 支持平台
+### 1.3 支持平台
 
 - Windows (MSVC)
 - Linux (GCC/Clang)
@@ -39,6 +46,8 @@ P2P Client Library 是一个基于 WebRTC DataChannel 的点对点通信库，�
 ---
 
 ## 2. 快速开始
+
+### 2.1 P2P 直连模式
 
 ```cpp
 #include <p2p/p2p_client.hpp>
@@ -69,6 +78,46 @@ int main() {
     // 保持运行
     std::cin.get();
     
+    return 0;
+}
+```
+
+### 2.2 服务端中继模式
+
+```cpp
+#include <p2p/p2p_client.hpp>
+#include <iostream>
+
+int main() {
+    p2p::P2PClient client("ws://localhost:8080");
+    
+    // 设置消息回调 (中继消息也会触发这些回调)
+    client.setOnTextMessage([](const std::string& from, const std::string& msg) {
+        std::cout << "收到消息 [" << from << "]: " << msg << std::endl;
+    });
+    
+    // 设置中继回调
+    client.setOnRelayConnected([](const std::string& peerId) {
+        std::cout << "中继已连接: " << peerId << std::endl;
+    });
+    
+    if (!client.connect()) {
+        return 1;
+    }
+    
+    // 进行中继认证
+    if (!client.authenticateRelay("your_password")) {
+        std::cerr << "中继认证失败" << std::endl;
+        return 1;
+    }
+    
+    // 通过中继连接到 Peer
+    client.connectToPeerViaRelay("peer_2");
+    
+    // 通过中继发送消息
+    client.sendTextViaRelay("peer_2", "Hello via relay!");
+    
+    std::cin.get();
     return 0;
 }
 ```
@@ -140,24 +189,39 @@ enum class ChannelState {
 };
 ```
 
-### 4.4 ErrorCode
+### 4.4 RelayState
+
+中继认证状态枚举。
+
+```cpp
+enum class RelayState {
+    NotAuthenticated,  // 未认证
+    Authenticating,    // 认证中
+    Authenticated,     // 已认证
+    AuthFailed         // 认证失败
+};
+```
+
+### 4.5 ErrorCode
 
 错误代码枚举。
 
 ```cpp
 enum class ErrorCode {
-    None = 0,           // 无错误
-    ConnectionFailed,   // 连接失败
-    SignalingError,     // 信令错误
-    PeerNotFound,       // Peer 不存在
-    ChannelNotOpen,     // 通道未打开
-    Timeout,            // 超时
-    InvalidData,        // 无效数据
-    InternalError       // 内部错误
+    None = 0,              // 无错误
+    ConnectionFailed,      // 连接失败
+    SignalingError,        // 信令错误
+    PeerNotFound,          // Peer 不存在
+    ChannelNotOpen,        // 通道未打开
+    Timeout,               // 超时
+    InvalidData,           // 无效数据
+    InternalError,         // 内部错误
+    RelayAuthFailed,       // 中继认证失败
+    RelayNotAuthenticated  // 未进行中继认证
 };
 ```
 
-### 4.5 Error
+### 4.6 Error
 
 错误信息结构体。
 
@@ -170,7 +234,7 @@ struct Error {
 };
 ```
 
-### 4.6 BinaryData
+### 4.7 BinaryData
 
 二进制数据类型别名。
 
@@ -178,7 +242,7 @@ struct Error {
 using BinaryData = std::vector<uint8_t>;
 ```
 
-### 4.7 Message
+### 4.8 Message
 
 通用消息结构体。
 
@@ -197,20 +261,21 @@ struct Message {
 };
 ```
 
-### 4.8 PeerInfo
+### 4.9 PeerInfo
 
 Peer 信息结构体。
 
 ```cpp
 struct PeerInfo {
-    std::string id;           // Peer ID
+    std::string id;            // Peer ID
     ChannelState channelState; // 通道状态
+    bool relayMode = false;    // 是否通过中继连接
     
-    bool isConnected() const; // channelState == Open
+    bool isConnected() const;  // channelState == Open
 };
 ```
 
-### 4.9 ClientConfig
+### 4.10 ClientConfig
 
 客户端配置结构体。
 
@@ -322,7 +387,7 @@ if (future.get()) {
 
 #### disconnect()
 
-断开所有连接。
+断开所有连接（包括 P2P 和中继连接）。
 
 ```cpp
 void disconnect();
@@ -362,11 +427,11 @@ std::string getLocalId() const;
 
 ---
 
-### 5.3 Peer 管理
+### 5.3 Peer 管理 (P2P 直连)
 
 #### connectToPeer()
 
-发起与指定 Peer 的连接。
+发起与指定 Peer 的 P2P 连接。
 
 ```cpp
 bool connectToPeer(const std::string& peerId);
@@ -405,7 +470,7 @@ if (future.get()) {
 
 #### disconnectFromPeer()
 
-断开与指定 Peer 的连接。
+断开与指定 Peer 的 P2P 连接。
 
 ```cpp
 void disconnectFromPeer(const std::string& peerId);
@@ -425,7 +490,7 @@ void requestPeerList();
 
 #### getConnectedPeers()
 
-获取已建立数据通道的 Peer 列表。
+获取已建立 P2P 数据通道的 Peer 列表。
 
 ```cpp
 std::vector<std::string> getConnectedPeers() const;
@@ -435,7 +500,7 @@ std::vector<std::string> getConnectedPeers() const;
 
 #### isPeerConnected()
 
-检查是否与指定 Peer 建立了数据通道。
+检查是否与指定 Peer 建立了 P2P 数据通道。
 
 ```cpp
 bool isPeerConnected(const std::string& peerId) const;
@@ -445,7 +510,7 @@ bool isPeerConnected(const std::string& peerId) const;
 
 #### getPeerInfo()
 
-获取 Peer 详细信息。
+获取 Peer 详细信息（包括 P2P 和中继连接）。
 
 ```cpp
 std::optional<PeerInfo> getPeerInfo(const std::string& peerId) const;
@@ -453,13 +518,23 @@ std::optional<PeerInfo> getPeerInfo(const std::string& peerId) const;
 
 **返回值:** 如果 Peer 存在返回 `PeerInfo`，否则返回 `std::nullopt`。
 
+**示例:**
+```cpp
+auto info = client.getPeerInfo("peer_2");
+if (info) {
+    std::cout << "Peer: " << info->id << std::endl;
+    std::cout << "连接模式: " << (info->relayMode ? "中继" : "P2P") << std::endl;
+    std::cout << "状态: " << (info->isConnected() ? "已连接" : "未连接") << std::endl;
+}
+```
+
 ---
 
-### 5.4 消息发送
+### 5.4 消息发送 (P2P 直连)
 
 #### sendText()
 
-发送文本消息。
+通过 P2P 发送文本消息。
 
 ```cpp
 bool sendText(const std::string& peerId, const std::string& message);
@@ -476,7 +551,7 @@ bool sendText(const std::string& peerId, const std::string& message);
 
 #### sendBinary()
 
-发送二进制数据。
+通过 P2P 发送二进制数据。
 
 ```cpp
 bool sendBinary(const std::string& peerId, const BinaryData& data);
@@ -509,7 +584,7 @@ client.sendBinary("peer_2", &myData, sizeof(myData));
 
 #### send()
 
-发送通用消息。
+通过 P2P 发送通用消息。
 
 ```cpp
 bool send(const std::string& peerId, const Message& message);
@@ -525,7 +600,7 @@ client.send("peer_2", p2p::Message::fromBinary({0x01, 0x02}));
 
 #### broadcastText()
 
-广播文本消息给所有已连接的 Peer。
+通过 P2P 广播文本消息给所有已连接的 Peer。
 
 ```cpp
 size_t broadcastText(const std::string& message);
@@ -537,7 +612,7 @@ size_t broadcastText(const std::string& message);
 
 #### broadcastBinary()
 
-广播二进制数据给所有已连接的 Peer。
+通过 P2P 广播二进制数据给所有已连接的 Peer。
 
 ```cpp
 size_t broadcastBinary(const BinaryData& data);
@@ -569,7 +644,183 @@ client.sendObject("peer_2", msg);
 
 ---
 
-### 5.5 静态方法
+### 5.5 中继模式
+
+#### authenticateRelay()
+
+进行中继认证（阻塞）。
+
+```cpp
+bool authenticateRelay(const std::string& password);
+```
+
+| 参数 | 类型 | 描述 |
+|-----|------|------|
+| `password` | `std::string` | 中继密码 |
+
+**返回值:** 认证成功返回 `true`。
+
+**示例:**
+```cpp
+if (client.authenticateRelay("your_password")) {
+    std::cout << "中继认证成功" << std::endl;
+} else {
+    std::cerr << "中继认证失败" << std::endl;
+}
+```
+
+---
+
+#### authenticateRelayAsync()
+
+异步进行中继认证。
+
+```cpp
+std::future<bool> authenticateRelayAsync(
+    const std::string& password,
+    std::chrono::milliseconds timeout = std::chrono::seconds(10)
+);
+```
+
+**示例:**
+```cpp
+auto future = client.authenticateRelayAsync("password", std::chrono::seconds(5));
+if (future.get()) {
+    std::cout << "认证成功" << std::endl;
+}
+```
+
+---
+
+#### getRelayState()
+
+获取中继认证状态。
+
+```cpp
+RelayState getRelayState() const;
+```
+
+---
+
+#### isRelayAuthenticated()
+
+检查是否已完成中继认证。
+
+```cpp
+bool isRelayAuthenticated() const;
+```
+
+---
+
+#### connectToPeerViaRelay()
+
+通过中继连接到 Peer。
+
+```cpp
+bool connectToPeerViaRelay(const std::string& peerId);
+```
+
+| 参数 | 类型 | 描述 |
+|-----|------|------|
+| `peerId` | `std::string` | 目标 Peer ID |
+
+**返回值:** 成功返回 `true`。
+
+**注意:** 需要先完成 `authenticateRelay()`。
+
+---
+
+#### disconnectFromPeerViaRelay()
+
+断开中继连接。
+
+```cpp
+void disconnectFromPeerViaRelay(const std::string& peerId);
+```
+
+---
+
+#### sendTextViaRelay()
+
+通过中继发送文本消息。
+
+```cpp
+bool sendTextViaRelay(const std::string& peerId, const std::string& message);
+```
+
+| 参数 | 类型 | 描述 |
+|-----|------|------|
+| `peerId` | `std::string` | 目标 Peer ID |
+| `message` | `std::string` | 文本内容 |
+
+**返回值:** 发送成功返回 `true`。
+
+---
+
+#### sendBinaryViaRelay()
+
+通过中继发送二进制数据。
+
+```cpp
+bool sendBinaryViaRelay(const std::string& peerId, const BinaryData& data);
+bool sendBinaryViaRelay(const std::string& peerId, const void* data, size_t size);
+```
+
+---
+
+#### sendViaRelay()
+
+通过中继发送通用消息。
+
+```cpp
+bool sendViaRelay(const std::string& peerId, const Message& message);
+```
+
+---
+
+#### broadcastTextViaRelay()
+
+通过中继广播文本消息给所有中继连接的 Peer。
+
+```cpp
+size_t broadcastTextViaRelay(const std::string& message);
+```
+
+**返回值:** 成功发送的 Peer 数量。
+
+---
+
+#### broadcastBinaryViaRelay()
+
+通过中继广播二进制数据给所有中继连接的 Peer。
+
+```cpp
+size_t broadcastBinaryViaRelay(const BinaryData& data);
+```
+
+---
+
+#### getRelayConnectedPeers()
+
+获取通过中继连接的 Peer 列表。
+
+```cpp
+std::vector<std::string> getRelayConnectedPeers() const;
+```
+
+---
+
+#### isPeerRelayConnected()
+
+检查是否通过中继与 Peer 连接。
+
+```cpp
+bool isPeerRelayConnected(const std::string& peerId) const;
+```
+
+---
+
+### 5.6 静态方法
 
 #### setLogLevel()
 
@@ -605,120 +856,70 @@ static std::string getVersion();
 ### 6.1 回调类型定义
 
 ```cpp
+// 基础回调
 using OnConnectedCallback = std::function<void()>;
 using OnDisconnectedCallback = std::function<void(const Error&)>;
+using OnErrorCallback = std::function<void(const Error& error)>;
+using OnStateChangeCallback = std::function<void(ConnectionState state)>;
+
+// P2P 连接回调
 using OnPeerConnectedCallback = std::function<void(const std::string& peerId)>;
 using OnPeerDisconnectedCallback = std::function<void(const std::string& peerId)>;
+
+// 消息回调 (P2P 和中继消息都会触发)
 using OnTextMessageCallback = std::function<void(const std::string& peerId, const std::string& message)>;
 using OnBinaryMessageCallback = std::function<void(const std::string& peerId, const BinaryData& data)>;
 using OnMessageCallback = std::function<void(const std::string& peerId, const Message& message)>;
+
+// Peer 列表回调
 using OnPeerListCallback = std::function<void(const std::vector<std::string>& peers)>;
-using OnErrorCallback = std::function<void(const Error& error)>;
-using OnStateChangeCallback = std::function<void(ConnectionState state)>;
+
+// 中继回调
+using OnRelayAuthResultCallback = std::function<void(bool success, const std::string& message)>;
+using OnRelayConnectedCallback = std::function<void(const std::string& peerId)>;
+using OnRelayDisconnectedCallback = std::function<void(const std::string& peerId)>;
 ```
 
 ### 6.2 设置回调
 
-#### setOnConnected()
-
-连接到信令服务器成功时触发。
+#### 基础回调
 
 ```cpp
 void setOnConnected(OnConnectedCallback callback);
-```
-
----
-
-#### setOnDisconnected()
-
-与信令服务器断开连接时触发。
-
-```cpp
 void setOnDisconnected(OnDisconnectedCallback callback);
+void setOnError(OnErrorCallback callback);
+void setOnStateChange(OnStateChangeCallback callback);
 ```
 
----
-
-#### setOnPeerConnected()
-
-与 Peer 的数据通道建立成功时触发。
+#### P2P 连接回调
 
 ```cpp
 void setOnPeerConnected(OnPeerConnectedCallback callback);
-```
-
-**重要:** 此回调触发后才能向该 Peer 发送消息。
-
----
-
-#### setOnPeerDisconnected()
-
-与 Peer 的连接断开时触发。
-
-```cpp
 void setOnPeerDisconnected(OnPeerDisconnectedCallback callback);
 ```
 
----
-
-#### setOnTextMessage()
-
-收到文本消息时触发。
+#### 消息回调
 
 ```cpp
 void setOnTextMessage(OnTextMessageCallback callback);
-```
-
----
-
-#### setOnBinaryMessage()
-
-收到二进制消息时触发。
-
-```cpp
 void setOnBinaryMessage(OnBinaryMessageCallback callback);
-```
-
----
-
-#### setOnMessage()
-
-收到任意消息时触发（文本和二进制）。
-
-```cpp
 void setOnMessage(OnMessageCallback callback);
 ```
 
-**注意:** 可以与 `setOnTextMessage` / `setOnBinaryMessage` 同时使用。
+**注意:** 消息回调对 P2P 和中继消息都会触发。
 
----
-
-#### setOnPeerList()
-
-收到在线 Peer 列表时触发。
+#### Peer 列表回调
 
 ```cpp
 void setOnPeerList(OnPeerListCallback callback);
 ```
 
----
-
-#### setOnError()
-
-发生错误时触发。
+#### 中继回调
 
 ```cpp
-void setOnError(OnErrorCallback callback);
-```
-
----
-
-#### setOnStateChange()
-
-连接状态变化时触发。
-
-```cpp
-void setOnStateChange(OnStateChangeCallback callback);
+void setOnRelayAuthResult(OnRelayAuthResultCallback callback);
+void setOnRelayConnected(OnRelayConnectedCallback callback);
+void setOnRelayDisconnected(OnRelayDisconnectedCallback callback);
 ```
 
 ---
@@ -728,6 +929,7 @@ void setOnStateChange(OnStateChangeCallback callback);
 ```cpp
 p2p::P2PClient client("ws://localhost:8080");
 
+// ========== 基础回调 ==========
 client.setOnConnected([]() {
     std::cout << "已连接到服务器" << std::endl;
 });
@@ -736,15 +938,26 @@ client.setOnDisconnected([](const p2p::Error& error) {
     std::cout << "已断开: " << error.message << std::endl;
 });
 
+client.setOnError([](const p2p::Error& error) {
+    std::cerr << "错误: " << error.message << std::endl;
+});
+
+client.setOnStateChange([](p2p::ConnectionState state) {
+    const char* names[] = {"断开", "连接中", "已连接", "失败"};
+    std::cout << "状态: " << names[static_cast<int>(state)] << std::endl;
+});
+
+// ========== P2P 回调 ==========
 client.setOnPeerConnected([&client](const std::string& peerId) {
-    std::cout << "Peer 已连接: " << peerId << std::endl;
+    std::cout << "P2P 已连接: " << peerId << std::endl;
     client.sendText(peerId, "欢迎！");
 });
 
 client.setOnPeerDisconnected([](const std::string& peerId) {
-    std::cout << "Peer 已断开: " << peerId << std::endl;
+    std::cout << "P2P 已断开: " << peerId << std::endl;
 });
 
+// ========== 消息回调 ==========
 client.setOnTextMessage([](const std::string& from, const std::string& msg) {
     std::cout << "[" << from << "]: " << msg << std::endl;
 });
@@ -760,13 +973,21 @@ client.setOnPeerList([](const std::vector<std::string>& peers) {
     }
 });
 
-client.setOnError([](const p2p::Error& error) {
-    std::cerr << "错误: " << error.message << std::endl;
+// ========== 中继回调 ==========
+client.setOnRelayAuthResult([](bool success, const std::string& message) {
+    if (success) {
+        std::cout << "中继认证成功: " << message << std::endl;
+    } else {
+        std::cerr << "中继认证失败: " << message << std::endl;
+    }
 });
 
-client.setOnStateChange([](p2p::ConnectionState state) {
-    const char* names[] = {"断开", "连接中", "已连接", "失败"};
-    std::cout << "状态: " << names[static_cast<int>(state)] << std::endl;
+client.setOnRelayConnected([](const std::string& peerId) {
+    std::cout << "中继已连接: " << peerId << std::endl;
+});
+
+client.setOnRelayDisconnected([](const std::string& peerId) {
+    std::cout << "中继已断开: " << peerId << std::endl;
 });
 ```
 
@@ -800,8 +1021,27 @@ client.setOnError([](const p2p::Error& error) {
         case p2p::ErrorCode::Timeout:
             std::cerr << "操作超时" << std::endl;
             break;
+        case p2p::ErrorCode::RelayAuthFailed:
+            std::cerr << "中继认证失败" << std::endl;
+            break;
+        case p2p::ErrorCode::RelayNotAuthenticated:
+            std::cerr << "未进行中继认证" << std::endl;
+            break;
         default:
             std::cerr << "错误: " << error.message << std::endl;
+    }
+});
+```
+
+### 7.3 中继认证错误
+
+```cpp
+client.setOnRelayAuthResult([](bool success, const std::string& message) {
+    if (!success) {
+        // 可能的错误:
+        // - "Relay is not configured on this server" (服务器未配置中继)
+        // - "Invalid password" (密码错误)
+        std::cerr << "认证失败: " << message << std::endl;
     }
 });
 ```
@@ -810,21 +1050,29 @@ client.setOnError([](const p2p::Error& error) {
 
 ## 8. 完整示例
 
-### 8.1 简单聊天客户端
+### 8.1 简单聊天客户端 (支持 P2P 和中继)
 
 ```cpp
 #include <p2p/p2p_client.hpp>
 #include <iostream>
 #include <string>
-#include <thread>
+#include <sstream>
+#include <vector>
+
+std::vector<std::string> split(const std::string& s, char delim = ' ') {
+    std::vector<std::string> result;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, delim)) {
+        if (!item.empty()) result.push_back(item);
+    }
+    return result;
+}
 
 int main() {
     p2p::P2PClient::setLogLevel(2);
     
-    p2p::ClientConfig config;
-    config.signalingUrl = "ws://localhost:8080";
-    
-    p2p::P2PClient client(config);
+    p2p::P2PClient client("ws://localhost:8080");
     
     // 设置回调
     client.setOnConnected([]() {
@@ -832,11 +1080,11 @@ int main() {
     });
     
     client.setOnPeerConnected([](const std::string& peerId) {
-        std::cout << ">>> " << peerId << " 已上线" << std::endl;
+        std::cout << ">>> P2P 连接: " << peerId << std::endl;
     });
     
-    client.setOnPeerDisconnected([](const std::string& peerId) {
-        std::cout << ">>> " << peerId << " 已下线" << std::endl;
+    client.setOnRelayConnected([](const std::string& peerId) {
+        std::cout << ">>> 中继连接: " << peerId << std::endl;
     });
     
     client.setOnTextMessage([](const std::string& from, const std::string& msg) {
@@ -854,6 +1102,14 @@ int main() {
         std::cerr << ">>> 错误: " << err.message << std::endl;
     });
     
+    client.setOnRelayAuthResult([](bool success, const std::string& message) {
+        if (success) {
+            std::cout << ">>> 中继认证成功" << std::endl;
+        } else {
+            std::cout << ">>> 中继认证失败: " << message << std::endl;
+        }
+    });
+    
     // 连接
     if (!client.connect()) {
         std::cerr << "连接失败" << std::endl;
@@ -861,27 +1117,70 @@ int main() {
     }
     
     std::cout << "我的 ID: " << client.getLocalId() << std::endl;
-    std::cout << "命令: list | connect <id> | send <id> <msg> | quit" << std::endl;
+    std::cout << "\n命令:" << std::endl;
+    std::cout << "  list                  - 列出在线用户" << std::endl;
+    std::cout << "  connect <id>          - P2P 连接" << std::endl;
+    std::cout << "  send <id> <msg>       - P2P 发送" << std::endl;
+    std::cout << "  relayauth <password>  - 中继认证" << std::endl;
+    std::cout << "  relayconnect <id>     - 中继连接" << std::endl;
+    std::cout << "  relaysend <id> <msg>  - 中继发送" << std::endl;
+    std::cout << "  peers                 - 列出已连接的 Peer" << std::endl;
+    std::cout << "  quit                  - 退出\n" << std::endl;
     
     // 命令循环
     std::string line;
     while (std::getline(std::cin, line)) {
-        if (line == "quit") break;
+        auto tokens = split(line);
+        if (tokens.empty()) continue;
         
-        if (line == "list") {
+        std::string cmd = tokens[0];
+        
+        if (cmd == "quit") {
+            break;
+        }
+        else if (cmd == "list") {
             client.requestPeerList();
         }
-        else if (line.substr(0, 8) == "connect ") {
-            std::string peerId = line.substr(8);
-            client.connectToPeer(peerId);
-        }
-        else if (line.substr(0, 5) == "send ") {
-            size_t space = line.find(' ', 5);
-            if (space != std::string::npos) {
-                std::string peerId = line.substr(5, space - 5);
-                std::string msg = line.substr(space + 1);
-                client.sendText(peerId, msg);
+        else if (cmd == "peers") {
+            auto p2pPeers = client.getConnectedPeers();
+            auto relayPeers = client.getRelayConnectedPeers();
+            
+            std::cout << "P2P 连接 (" << p2pPeers.size() << "):" << std::endl;
+            for (const auto& p : p2pPeers) {
+                std::cout << "  - " << p << std::endl;
             }
+            
+            std::cout << "中继连接 (" << relayPeers.size() << "):" << std::endl;
+            for (const auto& p : relayPeers) {
+                std::cout << "  - " << p << std::endl;
+            }
+        }
+        else if (cmd == "connect" && tokens.size() >= 2) {
+            client.connectToPeer(tokens[1]);
+            std::cout << "正在连接..." << std::endl;
+        }
+        else if (cmd == "send" && tokens.size() >= 3) {
+            std::string msg = line.substr(line.find(tokens[1]) + tokens[1].length() + 1);
+            if (client.sendText(tokens[1], msg)) {
+                std::cout << "已发送" << std::endl;
+            }
+        }
+        else if (cmd == "relayauth" && tokens.size() >= 2) {
+            client.authenticateRelay(tokens[1]);
+        }
+        else if (cmd == "relayconnect" && tokens.size() >= 2) {
+            if (client.connectToPeerViaRelay(tokens[1])) {
+                std::cout << "中继连接成功" << std::endl;
+            }
+        }
+        else if (cmd == "relaysend" && tokens.size() >= 3) {
+            std::string msg = line.substr(line.find(tokens[1]) + tokens[1].length() + 1);
+            if (client.sendTextViaRelay(tokens[1], msg)) {
+                std::cout << "已通过中继发送" << std::endl;
+            }
+        }
+        else {
+            std::cout << "未知命令: " << cmd << std::endl;
         }
     }
     
@@ -890,128 +1189,227 @@ int main() {
 }
 ```
 
-### 8.2 文件传输示例
-
-```cpp
-#include <p2p/p2p_client.hpp>
-#include <fstream>
-#include <vector>
-
-// 发送文件
-void sendFile(p2p::P2PClient& client, const std::string& peerId, const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
-    if (!file) {
-        std::cerr << "无法打开文件" << std::endl;
-        return;
-    }
-    
-    // 读取文件
-    std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)),
-                               std::istreambuf_iterator<char>());
-    
-    // 发送文件名 (JSON格式)
-    std::string header = R"({"type":"file","name":")" + filename + 
-                         R"(","size":)" + std::to_string(data.size()) + "}";
-    client.sendText(peerId, header);
-    
-    // 发送文件内容
-    client.sendBinary(peerId, data);
-    
-    std::cout << "文件已发送: " << filename << " (" << data.size() << " bytes)" << std::endl;
-}
-
-// 接收文件
-std::string pendingFileName;
-size_t pendingFileSize = 0;
-
-void onTextMessage(const std::string& from, const std::string& msg) {
-    // 解析文件头
-    if (msg.find(R"("type":"file")") != std::string::npos) {
-        // 简化解析
-        auto namePos = msg.find(R"("name":")") + 8;
-        auto nameEnd = msg.find('"', namePos);
-        pendingFileName = msg.substr(namePos, nameEnd - namePos);
-        
-        auto sizePos = msg.find(R"("size":)") + 7;
-        auto sizeEnd = msg.find('}', sizePos);
-        pendingFileSize = std::stoull(msg.substr(sizePos, sizeEnd - sizePos));
-        
-        std::cout << "准备接收文件: " << pendingFileName << std::endl;
-    }
-}
-
-void onBinaryMessage(const std::string& from, const p2p::BinaryData& data) {
-    if (!pendingFileName.empty()) {
-        std::ofstream file("received_" + pendingFileName, std::ios::binary);
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        std::cout << "文件已保存: received_" << pendingFileName << std::endl;
-        pendingFileName.clear();
-    }
-}
-```
-
-### 8.3 带重试的连接
+### 8.2 自动选择连接模式
 
 ```cpp
 #include <p2p/p2p_client.hpp>
 #include <chrono>
-#include <thread>
 
-bool connectWithRetry(p2p::P2PClient& client, int maxRetries = 3) {
-    for (int i = 0; i < maxRetries; ++i) {
-        std::cout << "连接尝试 " << (i + 1) << "/" << maxRetries << std::endl;
+class SmartP2PClient {
+public:
+    SmartP2PClient(const std::string& url, const std::string& relayPassword = "")
+        : client_(url), relayPassword_(relayPassword) {}
+    
+    bool connect() {
+        if (!client_.connect()) return false;
         
-        if (client.connect()) {
+        // 如果提供了中继密码，尝试认证
+        if (!relayPassword_.empty()) {
+            client_.authenticateRelay(relayPassword_);
+        }
+        
+        return true;
+    }
+    
+    // 智能连接：优先尝试 P2P，失败则使用中继
+    bool connectToPeer(const std::string& peerId, std::chrono::seconds timeout = std::chrono::seconds(10)) {
+        // 尝试 P2P 连接
+        auto future = client_.connectToPeerAsync(peerId, 
+            std::chrono::duration_cast<std::chrono::milliseconds>(timeout));
+        
+        if (future.get()) {
+            std::cout << "P2P 连接成功" << std::endl;
             return true;
         }
         
-        if (i < maxRetries - 1) {
-            std::cout << "等待 3 秒后重试..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+        // P2P 失败，尝试中继
+        if (client_.isRelayAuthenticated()) {
+            std::cout << "P2P 失败，尝试中继..." << std::endl;
+            if (client_.connectToPeerViaRelay(peerId)) {
+                std::cout << "中继连接成功" << std::endl;
+                return true;
+            }
         }
+        
+        return false;
     }
     
-    return false;
-}
+    // 智能发送：自动选择可用通道
+    bool sendText(const std::string& peerId, const std::string& message) {
+        if (client_.isPeerConnected(peerId)) {
+            return client_.sendText(peerId, message);
+        } else if (client_.isPeerRelayConnected(peerId)) {
+            return client_.sendTextViaRelay(peerId, message);
+        }
+        return false;
+    }
+    
+    p2p::P2PClient& getClient() { return client_; }
+    
+private:
+    p2p::P2PClient client_;
+    std::string relayPassword_;
+};
 
-bool connectToPeerWithTimeout(p2p::P2PClient& client, 
-                               const std::string& peerId,
-                               std::chrono::seconds timeout) {
-    client.connectToPeer(peerId);
+// 使用示例
+int main() {
+    SmartP2PClient client("ws://localhost:8080", "relay_password");
     
-    auto start = std::chrono::steady_clock::now();
-    while (!client.isPeerConnected(peerId)) {
-        if (std::chrono::steady_clock::now() - start > timeout) {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    client.getClient().setOnTextMessage([](const std::string& from, const std::string& msg) {
+        std::cout << "[" << from << "]: " << msg << std::endl;
+    });
+    
+    if (!client.connect()) {
+        return 1;
     }
     
-    return true;
+    // 自动选择最佳连接方式
+    if (client.connectToPeer("peer_2")) {
+        client.sendText("peer_2", "Hello!");
+    }
+    
+    std::cin.get();
+    return 0;
 }
+```
+
+### 8.3 文件传输 (支持中继)
+
+```cpp
+#include <p2p/p2p_client.hpp>
+#include <fstream>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+class FileTransfer {
+public:
+    FileTransfer(p2p::P2PClient& client) : client_(client) {
+        setupCallbacks();
+    }
+    
+    // 发送文件 (自动选择 P2P 或中继)
+    bool sendFile(const std::string& peerId, const std::string& filename) {
+        std::ifstream file(filename, std::ios::binary);
+        if (!file) return false;
+        
+        // 读取文件
+        std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)),
+                                   std::istreambuf_iterator<char>());
+        
+        // 发送文件头
+        json header = {
+            {"type", "file"},
+            {"name", filename},
+            {"size", data.size()}
+        };
+        
+        bool useRelay = !client_.isPeerConnected(peerId) && 
+                        client_.isPeerRelayConnected(peerId);
+        
+        if (useRelay) {
+            client_.sendTextViaRelay(peerId, header.dump());
+            client_.sendBinaryViaRelay(peerId, data);
+        } else {
+            client_.sendText(peerId, header.dump());
+            client_.sendBinary(peerId, data);
+        }
+        
+        return true;
+    }
+    
+private:
+    void setupCallbacks() {
+        client_.setOnTextMessage([this](const std::string& from, const std::string& msg) {
+            try {
+                auto j = json::parse(msg);
+                if (j["type"] == "file") {
+                    pendingFile_ = j["name"];
+                    pendingSize_ = j["size"];
+                    pendingFrom_ = from;
+                    std::cout << "准备接收文件: " << pendingFile_ << std::endl;
+                }
+            } catch (...) {}
+        });
+        
+        client_.setOnBinaryMessage([this](const std::string& from, const p2p::BinaryData& data) {
+            if (!pendingFile_.empty() && from == pendingFrom_) {
+                std::ofstream file("received_" + pendingFile_, std::ios::binary);
+                file.write(reinterpret_cast<const char*>(data.data()), data.size());
+                std::cout << "文件已保存: received_" << pendingFile_ << std::endl;
+                pendingFile_.clear();
+            }
+        });
+    }
+    
+    p2p::P2PClient& client_;
+    std::string pendingFile_;
+    std::string pendingFrom_;
+    size_t pendingSize_ = 0;
+};
 ```
 
 ---
 
-## 附录 A: 线程安全
+## 9. 服务端配置
+
+### 9.1 .env 文件
+
+服务端需要配置 `.env` 文件以启用中继功能：
+
+```env
+# 放在服务器可执行文件同目录下
+RELAY_PASSWORD=your_secure_password_here
+```
+
+### 9.2 服务端命令
+
+运行服务端后，可使用以下命令：
+
+| 命令 | 描述 |
+|-----|------|
+| `list` | 列出所有连接的客户端 |
+| `relay` | 列出已认证中继的客户端 |
+| `quit` | 关闭服务器 |
+
+---
+
+## 附录 A: P2P vs 中继对比
+
+| 特性 | P2P 直连 | 服务端中继 |
+|-----|---------|-----------|
+| 连通性 | 依赖 NAT 穿透 | 100% |
+| 延迟 | 低 | 较高 |
+| 服务器负载 | 无 | 有 |
+| 需要认证 | 否 | 是 |
+| 适用场景 | 常规通信 | NAT 穿透失败时 |
+
+## 附录 B: 线程安全
 
 - 所有公共方法都是**线程安全**的
 - 回调函数在**内部工作线程**中执行，如需更新 UI 请注意线程同步
 - 避免在回调中进行长时间阻塞操作
 
-## 附录 B: 性能建议
+## 附录 C: 性能建议
 
 1. **大文件传输**: 分块发送，每块 16KB-64KB
 2. **高频消息**: 考虑合并多条消息
 3. **二进制优先**: 结构化数据优先使用二进制格式
+4. **中继模式**: 仅在 P2P 失败时使用，避免服务器过载
 
-## 附录 C: 常见问题
+## 附录 D: 常见问题
 
 **Q: 为什么 `sendText` 返回 false？**
-A: 检查 `isPeerConnected()` 确保通道已打开。
+A: 检查 `isPeerConnected()` 或 `isPeerRelayConnected()` 确保通道已打开。
 
 **Q: 连接建立后多久可以发送消息？**
-A: 收到 `OnPeerConnected` 回调后立即可以发送。
+A: 收到 `OnPeerConnected` 或 `OnRelayConnected` 回调后立即可以发送。
 
 **Q: 最大消息大小是多少？**
-A: 理论上无限制，但建议单条消息不超过 256KB。
+A: P2P 理论上无限制，建议单条消息不超过 256KB。中继模式会经过 Base64 编码，实际负载会增加约 33%。
+
+**Q: 中继认证失败怎么办？**
+A: 检查服务器是否配置了 `.env` 文件，以及密码是否正确。
+
+**Q: P2P 和中继可以同时使用吗？**
+A: 可以。一个客户端可以同时维护 P2P 连接和中继连接，甚至对同一个 Peer 可以同时有两种连接。
