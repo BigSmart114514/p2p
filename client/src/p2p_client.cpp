@@ -539,12 +539,16 @@ public:
         }
     }
     
+    // *** 修改：不再要求本地已认证，只检查是否有中继连接 ***
     bool sendTextViaRelay(const std::string& peerId, const std::string& message) {
-        if (!isRelayAuthenticated()) {
-            if (onError_) {
-                onError_(Error{ErrorCode::RelayNotAuthenticated, "Not authenticated for relay"});
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            if (relayPeers_.count(peerId) == 0) {
+                if (onError_) {
+                    onError_(Error{ErrorCode::ChannelNotOpen, "No relay connection with " + peerId});
+                }
+                return false;
             }
-            return false;
         }
         
         RelayDataMessage dataMsg;
@@ -558,8 +562,11 @@ public:
         msg.payload = dataMsg.serialize();
         
         try {
-            ws_->send(msg.serialize());
-            return true;
+            if (ws_ && ws_->isOpen()) {
+                ws_->send(msg.serialize());
+                return true;
+            }
+            return false;
         } catch (const std::exception& e) {
             if (onError_) {
                 onError_(Error{ErrorCode::InternalError, e.what()});
@@ -568,12 +575,16 @@ public:
         }
     }
     
+    // *** 修改：不再要求本地已认证，只检查是否有中继连接 ***
     bool sendBinaryViaRelay(const std::string& peerId, const BinaryData& data) {
-        if (!isRelayAuthenticated()) {
-            if (onError_) {
-                onError_(Error{ErrorCode::RelayNotAuthenticated, "Not authenticated for relay"});
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            if (relayPeers_.count(peerId) == 0) {
+                if (onError_) {
+                    onError_(Error{ErrorCode::ChannelNotOpen, "No relay connection with " + peerId});
+                }
+                return false;
             }
-            return false;
         }
         
         RelayDataMessage dataMsg;
@@ -587,8 +598,11 @@ public:
         msg.payload = dataMsg.serialize();
         
         try {
-            ws_->send(msg.serialize());
-            return true;
+            if (ws_ && ws_->isOpen()) {
+                ws_->send(msg.serialize());
+                return true;
+            }
+            return false;
         } catch (const std::exception& e) {
             if (onError_) {
                 onError_(Error{ErrorCode::InternalError, e.what()});
@@ -612,30 +626,33 @@ public:
     }
     
     size_t broadcastTextViaRelay(const std::string& message) {
-        std::lock_guard<std::mutex> lock(peerMutex_);
-        size_t count = 0;
+        std::vector<std::string> peers;
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            peers.assign(relayPeers_.begin(), relayPeers_.end());
+        }
         
-        for (const auto& peerId : relayPeers_) {
-            // 临时解锁以避免死锁
-            peerMutex_.unlock();
+        size_t count = 0;
+        for (const auto& peerId : peers) {
             if (sendTextViaRelay(peerId, message)) {
                 ++count;
             }
-            peerMutex_.lock();
         }
         return count;
     }
     
     size_t broadcastBinaryViaRelay(const BinaryData& data) {
-        std::lock_guard<std::mutex> lock(peerMutex_);
-        size_t count = 0;
+        std::vector<std::string> peers;
+        {
+            std::lock_guard<std::mutex> lock(peerMutex_);
+            peers.assign(relayPeers_.begin(), relayPeers_.end());
+        }
         
-        for (const auto& peerId : relayPeers_) {
-            peerMutex_.unlock();
+        size_t count = 0;
+        for (const auto& peerId : peers) {
             if (sendBinaryViaRelay(peerId, data)) {
                 ++count;
             }
-            peerMutex_.lock();
         }
         return count;
     }

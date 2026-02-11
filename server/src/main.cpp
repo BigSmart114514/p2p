@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <mutex>
 #include <memory>
 #include <fstream>
@@ -21,6 +22,34 @@ struct ClientInfo {
     std::shared_ptr<rtc::WebSocket> ws;
     std::string id;
     bool relayAuthenticated = false;
+};
+
+// 中继连接对（用于快速查找）
+struct RelayPair {
+    std::string peer1;
+    std::string peer2;
+    
+    bool contains(const std::string& id) const {
+        return peer1 == id || peer2 == id;
+    }
+    
+    std::string getOther(const std::string& id) const {
+        return (peer1 == id) ? peer2 : peer1;
+    }
+    
+    // 用于 set 排序
+    bool operator<(const RelayPair& other) const {
+        auto a1 = std::min(peer1, peer2);
+        auto a2 = std::max(peer1, peer2);
+        auto b1 = std::min(other.peer1, other.peer2);
+        auto b2 = std::max(other.peer1, other.peer2);
+        return std::tie(a1, a2) < std::tie(b1, b2);
+    }
+    
+    bool operator==(const RelayPair& other) const {
+        return (peer1 == other.peer1 && peer2 == other.peer2) ||
+               (peer1 == other.peer2 && peer2 == other.peer1);
+    }
 };
 
 class SignalingServer {
@@ -74,7 +103,7 @@ public:
             } else if (line == "list") {
                 listClients();
             } else if (line == "relay") {
-                listRelayClients();
+                listRelayConnections();
             } else if (line == "help") {
                 std::cout << "Commands: list, relay, quit" << std::endl;
             }
@@ -296,6 +325,10 @@ private:
             return;
         }
         
+        // 建立中继连接对
+        RelayPair pair{fromId, msg.to};
+        relayConnections_.insert(pair);
+        
         // 通知目标客户端有新的中继连接
         p2p::SignalingMessage notifyMsg;
         notifyMsg.type = p2p::MessageType::RelayConnect;
@@ -303,16 +336,25 @@ private:
         notifyMsg.to = msg.to;
         toIt->second.ws->send(notifyMsg.serialize());
         
-        std::cout << "[Server] Relay connection: " << fromId << " -> " << msg.to << std::endl;
+        std::cout << "[Server] Relay connection established: " << fromId << " <-> " << msg.to << std::endl;
     }
     
     void handleRelayData(const std::string& fromId, const p2p::SignalingMessage& msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         
-        // 检查发送者是否已认证
-        auto fromIt = clients_.find(fromId);
-        if (fromIt == clients_.end() || !fromIt->second.relayAuthenticated) {
-            sendError(fromId, "Not authenticated for relay");
+        // 检查是否存在中继连接（不再检查发送者是否认证！）
+        RelayPair pair{fromId, msg.to};
+        bool hasRelayConnection = false;
+        
+        for (const auto& conn : relayConnections_) {
+            if (conn == pair) {
+                hasRelayConnection = true;
+                break;
+            }
+        }
+        
+        if (!hasRelayConnection) {
+            sendError(fromId, "No relay connection with " + msg.to);
             return;
         }
         
@@ -332,6 +374,10 @@ private:
     void handleRelayDisconnect(const std::string& fromId, const p2p::SignalingMessage& msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         
+        // 移除中继连接对
+        RelayPair pair{fromId, msg.to};
+        relayConnections_.erase(pair);
+        
         // 通知目标客户端中继连接断开
         auto toIt = clients_.find(msg.to);
         if (toIt != clients_.end()) {
@@ -342,7 +388,7 @@ private:
             toIt->second.ws->send(notifyMsg.serialize());
         }
         
-        std::cout << "[Server] Relay disconnect: " << fromId << " -> " << msg.to << std::endl;
+        std::cout << "[Server] Relay disconnect: " << fromId << " <-> " << msg.to << std::endl;
     }
     
     void sendError(const std::string& clientId, const std::string& message) {
@@ -357,6 +403,30 @@ private:
     
     void removeClient(const std::string& clientId) {
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        // 清理该客户端的所有中继连接
+        std::vector<RelayPair> toRemove;
+        for (const auto& conn : relayConnections_) {
+            if (conn.contains(clientId)) {
+                toRemove.push_back(conn);
+                
+                // 通知另一端断开
+                std::string otherId = conn.getOther(clientId);
+                auto otherIt = clients_.find(otherId);
+                if (otherIt != clients_.end()) {
+                    p2p::SignalingMessage notifyMsg;
+                    notifyMsg.type = p2p::MessageType::RelayDisconnect;
+                    notifyMsg.from = clientId;
+                    notifyMsg.to = otherId;
+                    otherIt->second.ws->send(notifyMsg.serialize());
+                }
+            }
+        }
+        
+        for (const auto& conn : toRemove) {
+            relayConnections_.erase(conn);
+        }
+        
         clients_.erase(clientId);
     }
     
@@ -370,18 +440,16 @@ private:
         std::cout << "Connected clients (" << clients_.size() << "):" << std::endl;
         for (const auto& [id, info] : clients_) {
             std::cout << "  - " << id 
-                      << (info.relayAuthenticated ? " [relay]" : "") 
+                      << (info.relayAuthenticated ? " [relay-auth]" : "") 
                       << std::endl;
         }
     }
     
-    void listRelayClients() {
+    void listRelayConnections() {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::cout << "Relay authenticated clients:" << std::endl;
-        for (const auto& [id, info] : clients_) {
-            if (info.relayAuthenticated) {
-                std::cout << "  - " << id << std::endl;
-            }
+        std::cout << "Active relay connections (" << relayConnections_.size() << "):" << std::endl;
+        for (const auto& conn : relayConnections_) {
+            std::cout << "  - " << conn.peer1 << " <-> " << conn.peer2 << std::endl;
         }
     }
 
@@ -390,6 +458,7 @@ private:
     std::string relayPassword_;
     std::unique_ptr<rtc::WebSocketServer> server_;
     std::unordered_map<std::string, ClientInfo> clients_;
+    std::set<RelayPair> relayConnections_;  // 中继连接对
     std::mutex mutex_;
 };
 
